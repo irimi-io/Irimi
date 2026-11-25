@@ -1,0 +1,38 @@
+{
+  "sdk": {"name": "irimi-python", "version": "0.2.0"},
+  "events": [
+    {"id": "r1", "type": "start", "trace_id": "t9d4", "span_id": "s1", "parent_span_id": null,
+     "kind": "workflow", "name": "handle_ticket", "seq": 0, "time_unix_nano": "1795341900000000000",
+     "mode": "shadow", "environment": "local",
+     "replay": {"source_run": "t7c1",
+                "overrides": [{"kind": "model", "from": "claude-sonnet-5-5", "to": "claude-opus-5-5"}],
+                "allowed_unpatched": ["sqlalchemy"]}},
+
+    {"id": "r2", "type": "start", "trace_id": "t9d4", "span_id": "s2", "parent_span_id": "s1",
+     "kind": "llm", "name": "anthropic messages.create", "seq": 1,
+     "time_unix_nano": "1795341900010000000",
+     "request": {"gen_ai.request.model": "claude-opus-5-5"}},
+    {"id": "r3", "type": "end", "trace_id": "t9d4", "span_id": "s2",
+     "time_unix_nano": "1795341902500000000", "status": "ok",
+     "answered": "live", "matched": {"span_id": "s2", "rule": "same kind and name"}},
+
+    {"id": "r4", "type": "start", "trace_id": "t9d4", "span_id": "s3", "parent_span_id": "s1",
+     "kind": "http", "name": "POST api.stripe.com/v1/refunds", "seq": 2,
+     "time_unix_nano": "1795341902550000000"},
+    {"id": "r5", "type": "end", "trace_id": "t9d4", "span_id": "s3",
+     "time_unix_nano": "1795341902551000000", "status": "ok",
+     "answered": "recorded", "matched": {"span_id": "s3", "rule": "same request"}},
+
+    {"id": "r6", "type": "start", "trace_id": "t9d4", "span_id": "s4", "parent_span_id": "s1",
+     "kind": "function", "name": "record_refund", "write": true, "seq": 3,
+     "time_unix_nano": "1795341902560000000"},
+    {"id": "r7", "type": "end", "trace_id": "t9d4", "span_id": "s4",
+     "time_unix_nano": "1795341902561000000", "status": "ok",
+     "answered": "recorded", "matched": {"span_id": "s4", "rule": "same name, same position"},
+     "changed": true, "output": {"row_id": 9917}},
+
+    {"id": "r8", "type": "end", "trace_id": "t9d4", "span_id": "s1",
+     "time_unix_nano": "1795341902570000000", "status": "ok",
+     "output": "Refund issued", "events_produced": 8}
+  ]
+}

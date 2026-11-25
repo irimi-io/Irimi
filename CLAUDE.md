@@ -6,6 +6,11 @@ a prompt, code) with writes faked, and compare the two runs. Python, managed wit
 The spec lives in Notion, on the Irimi page (Scope, and Step 1: Decide the boundaries). When the
 code and Notion disagree, ask which one is right; do not quietly pick one.
 
+Decisions made during the build go on the Design Decisions page in Notion. Write each one as a
+sentence or two saying what was decided, with the date, so it is cheap to replace later. No
+rationale, alternatives, costs or consequences unless asked. Record only what Henry decided or
+approved; mark anything else as proposed, and never write down details nobody discussed.
+
 ## Layout
 
 A `uv` workspace of separate packages. Each has its own `pyproject.toml`, a `src/` layout and its
