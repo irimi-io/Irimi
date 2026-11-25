@@ -66,8 +66,7 @@ Two rules that hold everywhere:
 - **No junk drawers.** No `utils.py`, `helpers.py` or `common/`. A helper lives next to its only
   caller. When a second caller appears, it moves to a module named for what it does
   (`redaction.py`, `ids.py`).
-- **No speculative code.** No interface with one implementation, no config for a fixed value, no
-  option nobody uses yet. Extract a shared abstraction only on the third repetition. Extending
+- **No speculative code.** No config for a fixed value, no option nobody uses yet. Extract a shared abstraction only on the third repetition. Extending
   later is cheap. Removing a wrong abstraction is expensive.
 - **Errors are explicit.** Raise specific exception types. No bare `except`. Never swallow an
   error silently. The SDK's fail-open path counts and flags what it drops.
