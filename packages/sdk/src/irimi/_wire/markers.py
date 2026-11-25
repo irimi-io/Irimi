@@ -11,10 +11,17 @@ def escape_reserved_keys(value: JsonValue) -> JsonValue:
         return [escape_reserved_keys(item) for item in value]
     if not isinstance(value, dict):
         return value
-    escaped = {name: escape_reserved_keys(item) for name, item in value.items()}
-    if RESERVED_KEY in value:
-        return {RESERVED_KEY: LITERAL, "value": escaped}
-    return escaped
+    return escape_reserved_key({name: escape_reserved_keys(item) for name, item in value.items()})
+
+
+def escape_reserved_key(items: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    if RESERVED_KEY in items:
+        return {RESERVED_KEY: LITERAL, "value": items}
+    return items
+
+
+def mark_unserialisable(type_name: str) -> dict[str, JsonValue]:
+    return {RESERVED_KEY: "unserialisable", "type": type_name}
 
 
 def unescape_reserved_keys(value: JsonValue) -> JsonValue:

@@ -7,10 +7,17 @@ from irimi._wire.events import (
     StartEvent,
     WireFormatError,
     parse_batch,
+    parse_event,
     write_batch,
+    write_event,
 )
 from irimi._wire.json_value import JsonValue
-from irimi._wire.markers import escape_reserved_keys, unescape_reserved_keys
+from irimi._wire.markers import (
+    escape_reserved_key,
+    escape_reserved_keys,
+    mark_unserialisable,
+    unescape_reserved_keys,
+)
 
 __all__ = [
     "Batch",
@@ -21,8 +28,12 @@ __all__ = [
     "RefusedEvent",
     "StartEvent",
     "WireFormatError",
+    "escape_reserved_key",
     "escape_reserved_keys",
+    "mark_unserialisable",
     "parse_batch",
+    "parse_event",
     "unescape_reserved_keys",
     "write_batch",
+    "write_event",
 ]

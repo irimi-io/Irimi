@@ -65,7 +65,7 @@ def parse_batch(document: JsonValue) -> ParsedBatch:
     refused: list[RefusedEvent] = []
     for index, event in enumerate(events):
         try:
-            accepted.append(_parse_event(event, f"events[{index}]"))
+            accepted.append(parse_event(event, f"events[{index}]"))
         except WireFormatError as error:
             refused.append(RefusedEvent(index=index, reason=str(error)))
     return ParsedBatch(
@@ -75,11 +75,11 @@ def parse_batch(document: JsonValue) -> ParsedBatch:
 
 
 def write_batch(batch: Batch) -> dict[str, JsonValue]:
-    events: list[JsonValue] = [_write_event(event) for event in batch.events]
+    events: list[JsonValue] = [write_event(event) for event in batch.events]
     return {**batch.fields, "events": events}
 
 
-def _parse_event(document: JsonValue, place: str) -> Event:
+def parse_event(document: JsonValue, place: str = "event") -> Event:
     if not isinstance(document, dict):
         raise WireFormatError(f"{place}: expected an object")
     event_type = _read_string(document, "type", place)
@@ -111,7 +111,7 @@ def _parse_start_event(document: dict[str, JsonValue], place: str) -> StartEvent
     )
 
 
-def _write_event(event: Event) -> dict[str, JsonValue]:
+def write_event(event: Event) -> dict[str, JsonValue]:
     document: dict[str, JsonValue] = {
         **event.fields,
         "id": event.id,
