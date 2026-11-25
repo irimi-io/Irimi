@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from irimi.wire.json_value import JsonValue
+from irimi._wire.json_value import JsonValue
 
 EVENT_FIELD_NAMES = frozenset({"id", "type", "trace_id", "span_id", "time_unix_nano"})
 START_FIELD_NAMES = frozenset({"parent_span_id", "kind", "name", "seq"})
+DIGITS_IN_LARGEST_TIME = len(str(2**64 - 1))
 
 
 class WireFormatError(ValueError):
@@ -42,15 +43,34 @@ class Batch:
     fields: Mapping[str, JsonValue]
 
 
-def parse_batch(document: JsonValue) -> Batch:
+@dataclass(frozen=True)
+class RefusedEvent:
+    index: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class ParsedBatch:
+    batch: Batch
+    refused: tuple[RefusedEvent, ...]
+
+
+def parse_batch(document: JsonValue) -> ParsedBatch:
     if not isinstance(document, dict):
         raise WireFormatError("batch: expected an object")
     events = document.get("events")
     if not isinstance(events, list):
         raise WireFormatError("batch.events: expected a list")
-    return Batch(
-        events=tuple(_parse_event(event, f"events[{index}]") for index, event in enumerate(events)),
-        fields=_without(document, frozenset({"events"})),
+    accepted: list[Event] = []
+    refused: list[RefusedEvent] = []
+    for index, event in enumerate(events):
+        try:
+            accepted.append(_parse_event(event, f"events[{index}]"))
+        except WireFormatError as error:
+            refused.append(RefusedEvent(index=index, reason=str(error)))
+    return ParsedBatch(
+        batch=Batch(events=tuple(accepted), fields=_without(document, frozenset({"events"}))),
+        refused=tuple(refused),
     )
 
 
@@ -118,6 +138,10 @@ def _read_time(document: dict[str, JsonValue], place: str) -> int:
     value = document.get("time_unix_nano")
     if not isinstance(value, str) or not (value.isascii() and value.isdigit()):
         raise WireFormatError(f"{place}.time_unix_nano: expected a string of digits")
+    if len(value) > DIGITS_IN_LARGEST_TIME:
+        raise WireFormatError(
+            f"{place}.time_unix_nano: expected at most {DIGITS_IN_LARGEST_TIME} digits"
+        )
     return int(value)
 
 

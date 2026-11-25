@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from irimi.wire import (
+from irimi._wire import (
     EndEvent,
     JsonValue,
     StartEvent,
@@ -48,11 +48,14 @@ def without(event: dict[str, Any], field: str) -> dict[str, Any]:
 def test_a_run_is_written_back_exactly_as_it_was_read(fixture: str) -> None:
     document = load_fixture(fixture)
 
-    assert write_batch(parse_batch(document)) == document
+    parsed = parse_batch(document)
+
+    assert parsed.refused == ()
+    assert write_batch(parsed.batch) == document
 
 
 def test_required_fields_are_typed() -> None:
-    events = parse_batch(load_fixture("recorded_run.json")).events
+    events = parse_batch(load_fixture("recorded_run.json")).batch.events
     run_start, run_end = events[0], events[-1]
 
     assert isinstance(run_start, StartEvent)
@@ -76,32 +79,38 @@ def test_unknown_types_kinds_and_fields_are_kept() -> None:
     database_call = start_event(kind="database", statement="select 1")
     document = {**batch_of(score, database_call), "region": "eu"}
 
-    batch = parse_batch(document)
+    batch = parse_batch(document).batch
 
     assert not isinstance(batch.events[0], (StartEvent, EndEvent))
     assert write_batch(batch) == document
 
 
-@pytest.mark.parametrize(
-    "document",
-    [
-        [],
-        {"sdk": {}},
-        {"events": {}},
-        batch_of("not an event"),
-        *(batch_of(without(start_event(), field)) for field in start_event()),
-        batch_of(start_event(id="")),
-        batch_of(start_event(trace_id=7)),
-        batch_of(start_event(time_unix_nano=1795341600000000000)),
-        batch_of(start_event(time_unix_nano="2026-11-22T10:00:00Z")),
-        batch_of(start_event(seq="0")),
-        batch_of(start_event(seq=True)),
-        batch_of(start_event(parent_span_id=3)),
-    ],
-)
-def test_a_missing_or_malformed_required_field_is_refused(document: Any) -> None:
+@pytest.mark.parametrize("document", [[], {"sdk": {}}, {"events": {}}])
+def test_a_batch_without_a_list_of_events_is_refused(document: Any) -> None:
     with pytest.raises(WireFormatError):
         parse_batch(document)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        "not an event",
+        *(without(start_event(), field) for field in start_event()),
+        start_event(id=""),
+        start_event(trace_id=7),
+        start_event(time_unix_nano=1795341600000000000),
+        start_event(time_unix_nano="2026-11-22T10:00:00Z"),
+        start_event(time_unix_nano="9" * 5000),
+        start_event(seq="0"),
+        start_event(seq=True),
+        start_event(parent_span_id=3),
+    ],
+)
+def test_a_malformed_event_is_refused_and_the_rest_of_the_batch_is_kept(event: Any) -> None:
+    parsed = parse_batch(batch_of(start_event(), event))
+
+    assert write_batch(parsed.batch) == batch_of(start_event())
+    assert [refused.index for refused in parsed.refused] == [1]
 
 
 def test_real_data_with_the_reserved_key_survives_escaping() -> None:

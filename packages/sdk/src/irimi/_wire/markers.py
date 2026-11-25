@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from irimi.wire.json_value import JsonValue
+from irimi._wire.json_value import JsonValue
 
 RESERVED_KEY = "$irimi"
 LITERAL = "literal"
