@@ -1,0 +1,23 @@
+[project]
+name = "irimi"
+version = "0.2.0.dev0"
+description = "Shadow runs for AI agents: replay a production run with one change, writes faked, and see the difference."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/irimi-io/Irimi"
+Issues = "https://github.com/irimi-io/Irimi/issues"
+Source = "https://github.com/irimi-io/Irimi"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

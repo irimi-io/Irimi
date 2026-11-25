@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run mypy
+      - run: uv run mypy --python-version 3.10 packages/sdk/src
+      - if: hashFiles('packages/*/tests/**/test_*.py') != ''
+        run: uv run pytest
+
+  pip-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - run: uv build --package irimi
+      - run: uv venv --seed --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+      - run: '"$RUNNER_TEMP/venv/bin/pip" install dist/*.whl'
+      - run: '"$RUNNER_TEMP/venv/bin/python" -c "import irimi"'
+      - if: hashFiles('packages/sdk/tests/**/test_*.py') != ''
+        run: |
+          "$RUNNER_TEMP/venv/bin/pip" install pytest
+          "$RUNNER_TEMP/venv/bin/python" -m pytest packages/sdk/tests
