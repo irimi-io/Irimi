@@ -6,18 +6,25 @@ from dataclasses import dataclass
 
 from irimi._wire import JsonValue, escape_reserved_key, mark_unserialisable
 
+SIZE_OF_A_SMALL_VALUE = 8
+
 
 @dataclass(frozen=True)
 class Serialised:
     value: JsonValue
     is_complete: bool
+    approximate_size: int
 
 
 def serialise(value: object) -> Serialised:
+    snapshot = _Snapshot()
     try:
-        return _serialise(value)
+        taken = snapshot.take(value)
     except RecursionError:
-        return _record_by_type(value)
+        return Serialised(
+            mark_unserialisable(name_type(type(value))), is_complete=False, approximate_size=0
+        )
+    return Serialised(taken, snapshot.is_complete, snapshot.approximate_size)
 
 
 def serialise_arguments(
@@ -26,39 +33,34 @@ def serialise_arguments(
     return serialise({"args": list(arguments), "kwargs": dict(keyword_arguments)})
 
 
-def _serialise(value: object) -> Serialised:
-    if value is None or isinstance(value, (bool, int, str)):
-        return Serialised(value, is_complete=True)
-    if isinstance(value, float):
-        return (
-            Serialised(value, is_complete=True) if math.isfinite(value) else _record_by_type(value)
-        )
-    if isinstance(value, (list, tuple)):
-        return _serialise_items(value)
-    if isinstance(value, dict) and all(isinstance(name, str) for name in value):
-        return _serialise_object(value)
-    return _record_by_type(value)
+def name_type(named: type) -> str:
+    return f"{named.__module__}.{named.__qualname__}"
 
 
-def _serialise_items(items: Sequence[object]) -> Serialised:
-    serialised = [_serialise(item) for item in items]
-    return Serialised(
-        [item.value for item in serialised],
-        is_complete=all(item.is_complete for item in serialised),
-    )
+class _Snapshot:
+    def __init__(self) -> None:
+        self.is_complete = True
+        self.approximate_size = 0
 
+    def take(self, value: object) -> JsonValue:
+        if isinstance(value, str):
+            self.approximate_size += len(value)
+            return value
+        if value is None or isinstance(value, (bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else self._record_by_type(value)
+        if isinstance(value, (list, tuple)):
+            self.approximate_size += SIZE_OF_A_SMALL_VALUE * len(value)
+            return [self.take(item) for item in value]
+        if isinstance(value, dict) and all(isinstance(name, str) for name in value):
+            return self._take_object(value)
+        return self._record_by_type(value)
 
-def _serialise_object(items: Mapping[str, object]) -> Serialised:
-    serialised = {name: _serialise(item) for name, item in items.items()}
-    return Serialised(
-        escape_reserved_key({name: item.value for name, item in serialised.items()}),
-        is_complete=all(item.is_complete for item in serialised.values()),
-    )
+    def _take_object(self, items: dict[str, object]) -> JsonValue:
+        self.approximate_size += sum(map(len, items)) + SIZE_OF_A_SMALL_VALUE * len(items)
+        return escape_reserved_key({name: self.take(item) for name, item in items.items()})
 
-
-def _record_by_type(value: object) -> Serialised:
-    value_type = type(value)
-    return Serialised(
-        mark_unserialisable(f"{value_type.__module__}.{value_type.__qualname__}"),
-        is_complete=False,
-    )
+    def _record_by_type(self, value: object) -> JsonValue:
+        self.is_complete = False
+        return mark_unserialisable(name_type(type(value)))

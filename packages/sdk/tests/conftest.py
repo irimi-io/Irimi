@@ -12,6 +12,7 @@ class FakeStore:
     def __init__(self) -> None:
         self.batches: list[dict[str, Any]] = []
         self.paths: list[str] = []
+        self.answer = b'{"refused": []}'
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -37,8 +38,9 @@ class FakeStore:
                 store.paths.append(self.path)
                 store.batches.append(json.loads(self.rfile.read(length)))
                 self.send_response(200)
-                self.send_header("Content-Length", "0")
+                self.send_header("Content-Length", str(len(store.answer)))
                 self.end_headers()
+                self.wfile.write(store.answer)
 
             def log_message(self, format: str, *args: Any) -> None:
                 return

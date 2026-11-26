@@ -5,10 +5,12 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeVar, cast, overload
 
-from irimi._recording import ActiveCall, CallLabel
+from irimi._labeled_calls import CallLabel, describe_error, describe_output, describe_start
+from irimi._recording import ActiveCall, Payload
 from irimi._sdk import SDK
 
 DecoratedFunction = TypeVar("DecoratedFunction", bound=Callable[..., Any])
+Outcome = TypeVar("Outcome")
 
 
 @overload
@@ -87,9 +89,9 @@ def _record_calls(function: DecoratedFunction, label: CallLabel) -> DecoratedFun
             try:
                 output = await function(*arguments, **keyword_arguments)
             except BaseException as error:
-                _end_call_with_error(call, error)
+                _end_call(call, describe_error, error)
                 raise
-            _end_call_with_output(call, output)
+            _end_call(call, describe_output, output)
             return output
 
         return cast("DecoratedFunction", record_async_call)
@@ -100,9 +102,9 @@ def _record_calls(function: DecoratedFunction, label: CallLabel) -> DecoratedFun
         try:
             output = function(*arguments, **keyword_arguments)
         except BaseException as error:
-            _end_call_with_error(call, error)
+            _end_call(call, describe_error, error)
             raise
-        _end_call_with_output(call, output)
+        _end_call(call, describe_output, output)
         return output
 
     return cast("DecoratedFunction", record_call)
@@ -111,29 +113,28 @@ def _record_calls(function: DecoratedFunction, label: CallLabel) -> DecoratedFun
 def _begin_call(
     label: CallLabel, arguments: Sequence[object], keyword_arguments: Mapping[str, object]
 ) -> ActiveCall | None:
-    if SDK.recorder is None:
+    recording = SDK.recording
+    if recording is None:
         return None
     try:
-        return SDK.recorder.begin_call(label, arguments, keyword_arguments)
+        is_root = recording.recorder.find_current_call() is None
+        payload = describe_start(label, arguments, keyword_arguments, recording.settings, is_root)
+        return recording.recorder.begin_call(label.kind, label.name, payload)
     except Exception:
         SDK.report_failure("record the start of a call")
         return None
 
 
-def _end_call_with_output(call: ActiveCall | None, output: object) -> None:
-    if call is None or SDK.recorder is None:
+def _end_call(
+    call: ActiveCall | None,
+    describe_end: Callable[[Outcome], Payload],
+    outcome: Outcome,
+) -> None:
+    recording = SDK.recording
+    if call is None or recording is None:
         return
     try:
-        SDK.recorder.end_call_with_output(call, output)
-    except Exception:
-        SDK.report_failure("record the end of a call")
-
-
-def _end_call_with_error(call: ActiveCall | None, error: BaseException) -> None:
-    if call is None or SDK.recorder is None:
-        return
-    try:
-        SDK.recorder.end_call_with_error(call, error)
+        recording.recorder.end_call(call, describe_end(outcome))
     except Exception:
         SDK.report_failure("record the end of a call")
 

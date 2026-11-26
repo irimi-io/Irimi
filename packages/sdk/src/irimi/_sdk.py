@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import logging
 import os
 import threading
@@ -10,10 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from irimi._delivery import Destination, post_batch
+from irimi._delivery import Destination, StoreClient
+from irimi._drops import DropTally
 from irimi._exporter import Exporter
 from irimi._git import find_commit
-from irimi._recording import Recorder, RunSettings
+from irimi._labeled_calls import RunSettings
+from irimi._recording import Recorder
 
 logger = logging.getLogger("irimi")
 
@@ -39,17 +40,23 @@ class InitArguments:
     environment: str | None
 
 
+@dataclass(frozen=True)
+class Recording:
+    recorder: Recorder
+    settings: RunSettings
+
+
 NORMAL_RUN = InitResult(mode="normal", patched=(), unpatched=())
 
 
 class Sdk:
     def __init__(self) -> None:
-        self.recorder: Recorder | None = None
+        self.recording: Recording | None = None
         self._lock = threading.Lock()
         self._exporter: Exporter | None = None
         self._first_arguments: InitArguments | None = None
         self._workflow_import_paths: dict[str, str] = {}
-        self._failure_count = 0
+        self._drops = DropTally()
 
     def init(
         self,
@@ -67,9 +74,8 @@ class Sdk:
             return NORMAL_RUN
 
     def flush(self, timeout: float | None) -> bool:
-        if self._exporter is None:
-            return True
-        return self._exporter.flush(timeout)
+        is_drained = self._exporter is None or self._exporter.flush(timeout)
+        return is_drained and self._drops.take_new_count() == 0
 
     def register_workflow(self, name: str, import_path: str) -> None:
         with self._lock:
@@ -80,11 +86,7 @@ class Sdk:
             )
 
     def report_failure(self, action: str) -> None:
-        with self._lock:
-            self._failure_count += 1
-            is_first_failure = self._failure_count == 1
-        if is_first_failure:
-            logger.warning("irimi failed to %s; the app is unaffected", action, exc_info=True)
+        self._drops.record(1, f"irimi failed to {action}; the app is unaffected", True)
 
     def _start_recording(
         self,
@@ -105,8 +107,8 @@ class Sdk:
             version=arguments.version or environment_variables.get("IRIMI_VERSION"),
             commit=find_commit(working_directory),
         )
-        self._exporter = Exporter(functools.partial(post_batch, destination))
-        self.recorder = Recorder(settings, self._exporter.enqueue, time.time_ns)
+        self._exporter = Exporter(StoreClient(destination).send_batch, self._drops)
+        self.recording = Recording(Recorder(self._exporter.enqueue, time.time_ns), settings)
 
 
 SDK = Sdk()
