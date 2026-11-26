@@ -1,4 +1,6 @@
 from irimi._wire.events import (
+    EVENTS_PATH,
+    WIRE_VERSION,
     Batch,
     EndEvent,
     Event,
@@ -8,9 +10,12 @@ from irimi._wire.events import (
     WireFormatError,
     parse_batch,
     parse_event,
+    parse_refused_events,
     write_batch,
     write_event,
+    write_refused_events,
 )
+from irimi._wire.field_names import Flag, write_flags
 from irimi._wire.json_value import JsonValue
 from irimi._wire.markers import (
     escape_reserved_key,
@@ -20,9 +25,12 @@ from irimi._wire.markers import (
 )
 
 __all__ = [
+    "EVENTS_PATH",
+    "WIRE_VERSION",
     "Batch",
     "EndEvent",
     "Event",
+    "Flag",
     "JsonValue",
     "ParsedBatch",
     "RefusedEvent",
@@ -33,7 +41,10 @@ __all__ = [
     "mark_unserialisable",
     "parse_batch",
     "parse_event",
+    "parse_refused_events",
     "unescape_reserved_keys",
     "write_batch",
     "write_event",
+    "write_flags",
+    "write_refused_events",
 ]

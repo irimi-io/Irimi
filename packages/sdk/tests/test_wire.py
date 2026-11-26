@@ -101,6 +101,8 @@ def test_a_batch_without_a_list_of_events_is_refused(document: Any) -> None:
         start_event(time_unix_nano=1795341600000000000),
         start_event(time_unix_nano="2026-11-22T10:00:00Z"),
         start_event(time_unix_nano="9" * 5000),
+        start_event(time_unix_nano=str(2**63)),
+        start_event(seq=2**63),
         start_event(seq="0"),
         start_event(seq=True),
         start_event(parent_span_id=3),
