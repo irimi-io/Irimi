@@ -1,18 +1,15 @@
 import socket
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator
 
 import pytest
 import uvicorn
 from irimi_store.app import create_app
 from irimi_store.storage import StorageEngine
 
-StartStore = Callable[[StorageEngine], AbstractContextManager[str]]
 
-
-@contextmanager
-def run_store(storage: StorageEngine) -> Iterator[str]:
+@pytest.fixture
+def store_url(storage: StorageEngine) -> Iterator[str]:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(create_app(storage), log_level="warning"))
@@ -25,8 +22,3 @@ def run_store(storage: StorageEngine) -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
-
-
-@pytest.fixture
-def start_store() -> StartStore:
-    return run_store

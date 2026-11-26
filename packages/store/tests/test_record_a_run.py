@@ -1,13 +1,10 @@
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Sequence
 
+import pytest
 from irimi._wire import EndEvent, Event, StartEvent
-from irimi_store.storage import StorageEngine
-
-StartStore = Callable[[StorageEngine], AbstractContextManager[str]]
 
 APP = """
 import irimi
@@ -38,15 +35,20 @@ class MemoryStorageEngine:
         return tuple(event for event in self.events if event.trace_id == trace_id)
 
 
-def test_a_run_recorded_in_an_app_arrives_in_the_store(start_store: StartStore) -> None:
-    storage = MemoryStorageEngine()
-    with start_store(storage) as store_url:
-        subprocess.run(
-            [sys.executable, "-c", APP],
-            env={**os.environ, "IRIMI_STORE_URL": store_url, "IRIMI_ENVIRONMENT": "production"},
-            timeout=60,
-            check=True,
-        )
+@pytest.fixture
+def storage() -> MemoryStorageEngine:
+    return MemoryStorageEngine()
+
+
+def test_a_run_recorded_in_an_app_arrives_in_the_store(
+    store_url: str, storage: MemoryStorageEngine
+) -> None:
+    subprocess.run(
+        [sys.executable, "-c", APP],
+        env={**os.environ, "IRIMI_STORE_URL": store_url, "IRIMI_ENVIRONMENT": "production"},
+        timeout=60,
+        check=True,
+    )
 
     run_start, step_start, step_end, run_end = storage.events
 
