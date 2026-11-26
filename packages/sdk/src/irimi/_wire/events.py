@@ -5,9 +5,12 @@ from dataclasses import dataclass
 
 from irimi._wire.json_value import JsonValue
 
+WIRE_VERSION = "v1"
+EVENTS_PATH = f"/{WIRE_VERSION}/events"
 EVENT_FIELD_NAMES = frozenset({"id", "type", "trace_id", "span_id", "time_unix_nano"})
 START_FIELD_NAMES = frozenset({"parent_span_id", "kind", "name", "seq"})
-DIGITS_IN_LARGEST_TIME = len(str(2**64 - 1))
+LARGEST_WHOLE_NUMBER = 2**63 - 1
+DIGITS_IN_LARGEST_WHOLE_NUMBER = len(str(LARGEST_WHOLE_NUMBER))
 
 
 class WireFormatError(ValueError):
@@ -65,7 +68,7 @@ def parse_batch(document: JsonValue) -> ParsedBatch:
     refused: list[RefusedEvent] = []
     for index, event in enumerate(events):
         try:
-            accepted.append(_parse_event(event, f"events[{index}]"))
+            accepted.append(parse_event(event, f"events[{index}]"))
         except WireFormatError as error:
             refused.append(RefusedEvent(index=index, reason=str(error)))
     return ParsedBatch(
@@ -75,11 +78,35 @@ def parse_batch(document: JsonValue) -> ParsedBatch:
 
 
 def write_batch(batch: Batch) -> dict[str, JsonValue]:
-    events: list[JsonValue] = [_write_event(event) for event in batch.events]
+    events: list[JsonValue] = [write_event(event) for event in batch.events]
     return {**batch.fields, "events": events}
 
 
-def _parse_event(document: JsonValue, place: str) -> Event:
+def parse_refused_events(document: JsonValue) -> tuple[RefusedEvent, ...]:
+    if not isinstance(document, dict):
+        raise WireFormatError("answer: expected an object")
+    refused = document.get("refused")
+    if not isinstance(refused, list):
+        raise WireFormatError("answer.refused: expected a list")
+    return tuple(
+        _parse_refused_event(item, f"refused[{place}]") for place, item in enumerate(refused)
+    )
+
+
+def write_refused_events(refused: tuple[RefusedEvent, ...]) -> dict[str, JsonValue]:
+    return {"refused": [{"index": event.index, "reason": event.reason} for event in refused]}
+
+
+def _parse_refused_event(document: JsonValue, place: str) -> RefusedEvent:
+    if not isinstance(document, dict):
+        raise WireFormatError(f"{place}: expected an object")
+    index = document.get("index")
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise WireFormatError(f"{place}.index: expected a whole number")
+    return RefusedEvent(index=index, reason=_read_string(document, "reason", place))
+
+
+def parse_event(document: JsonValue, place: str = "event") -> Event:
     if not isinstance(document, dict):
         raise WireFormatError(f"{place}: expected an object")
     event_type = _read_string(document, "type", place)
@@ -111,7 +138,7 @@ def _parse_start_event(document: dict[str, JsonValue], place: str) -> StartEvent
     )
 
 
-def _write_event(event: Event) -> dict[str, JsonValue]:
+def write_event(event: Event) -> dict[str, JsonValue]:
     document: dict[str, JsonValue] = {
         **event.fields,
         "id": event.id,
@@ -138,10 +165,8 @@ def _read_time(document: dict[str, JsonValue], place: str) -> int:
     value = document.get("time_unix_nano")
     if not isinstance(value, str) or not (value.isascii() and value.isdigit()):
         raise WireFormatError(f"{place}.time_unix_nano: expected a string of digits")
-    if len(value) > DIGITS_IN_LARGEST_TIME:
-        raise WireFormatError(
-            f"{place}.time_unix_nano: expected at most {DIGITS_IN_LARGEST_TIME} digits"
-        )
+    if len(value) > DIGITS_IN_LARGEST_WHOLE_NUMBER or int(value) > LARGEST_WHOLE_NUMBER:
+        raise WireFormatError(f"{place}.time_unix_nano: expected at most {LARGEST_WHOLE_NUMBER}")
     return int(value)
 
 
@@ -157,6 +182,8 @@ def _read_seq(document: dict[str, JsonValue], place: str) -> int:
     value = document.get("seq")
     if isinstance(value, bool) or not isinstance(value, int):
         raise WireFormatError(f"{place}.seq: expected a whole number")
+    if abs(value) > LARGEST_WHOLE_NUMBER:
+        raise WireFormatError(f"{place}.seq: expected at most {LARGEST_WHOLE_NUMBER}")
     return value
 
 
