@@ -88,6 +88,7 @@ class FakeUpstream:
     def __init__(self) -> None:
         self._answers: dict[str, UpstreamAnswer] = {}
         self.requests: list[tuple[str, str, bytes]] = []
+        self.request_headers: list[dict[str, str]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         threading.Thread(
             target=self._server.serve_forever, args=(SECONDS_BETWEEN_SHUTDOWN_CHECKS,), daemon=True
@@ -112,6 +113,7 @@ class FakeUpstream:
 
             def answer(self) -> None:
                 path = urlsplit(self.path).path
+                upstream.request_headers.append(dict(self.headers.items()))
                 upstream.requests.append((self.command, path, self._read_body()))
                 answer = upstream._answers.get(path, UpstreamAnswer())
                 self.send_response(answer.status)

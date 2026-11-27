@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -178,6 +179,29 @@ def test_the_value_of_a_credential_header_is_never_recorded(
     assert "session=abc" not in json.dumps(events)
     assert upstream.requests[-1] == ("GET", "/charges", b"")
     assert answer.headers["set-cookie"] == "session=abc, session=abc"
+
+
+def test_a_password_in_the_url_is_never_recorded(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    credentials = base64.b64encode(b"alice:s3cretpw").decode()
+    address = upstream.url.replace("http://", "http://alice:s3cretpw@")
+
+    @irimi.workflow
+    def look_up_invoice() -> int:
+        with http_library.Client() as client:
+            return int(client.get(f"{address}/v1/invoices?limit=3").status_code)
+
+    assert look_up_invoice() == 200
+
+    events = recorded_events()
+    _, call_start, _, _ = events
+
+    assert call_start["request"]["url"] == f"{upstream.url}/v1/invoices?limit=3"
+    assert call_start["request"]["headers"]["Authorization"] == REDACTED
+    assert "s3cretpw" not in json.dumps(events)
+    assert credentials not in json.dumps(events)
+    assert upstream.request_headers[-1]["Authorization"] == f"Basic {credentials}"
 
 
 def test_a_header_sent_twice_is_recorded_once_with_its_values_joined(

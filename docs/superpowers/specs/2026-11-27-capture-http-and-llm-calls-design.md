@@ -203,7 +203,8 @@ Start event, written before the request is sent:
 - `name`: for `http`, method, host without the port, and path, as
   `POST api.stripe.com/v1/refunds`. For `llm`, provider and operation, as
   `anthropic messages.create`. (from Notion; leaving the port out is proposed)
-- `request`: `method`, `url` (as sent, query string included), `headers`, `body`. (proposed)
+- `request`: `method`, `url` (as sent, query string included, without any `user:password@` part,
+  which travels as the `Authorization` header), `headers`, `body`. (proposed)
 
 End event, written once, on the first of: the response body is read to its end, the response is
 closed, or an exception is raised. (proposed)

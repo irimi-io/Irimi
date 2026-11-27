@@ -41,13 +41,22 @@ def name_http_call(call: OutboundCall) -> str:
     return f"{call.method} {address.hostname or ''}{address.path or '/'}"
 
 
+def _remove_userinfo(url: str) -> str:
+    address = urlsplit(url).netloc
+    _, at_sign, host_and_port = address.rpartition("@")
+    if not at_sign:
+        return url
+    return url.replace(address, host_and_port, 1)
+
+
 def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
+    url = _remove_userinfo(call.url)
     request: dict[str, JsonValue] = {
         "method": call.method,
-        "url": call.url,
+        "url": url,
         "headers": replace_credential_values(call.headers),
     }
-    size = len(call.url) + _measure_header_values(call.headers)
+    size = len(url) + _measure_header_values(call.headers)
     flags: list[Flag] = []
     if not is_attached:
         flags.append("unattached")
