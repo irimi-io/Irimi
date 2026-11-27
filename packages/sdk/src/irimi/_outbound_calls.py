@@ -48,8 +48,10 @@ def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
         "headers": replace_credential_values(call.headers),
     }
     size = len(call.url) + _measure_header_values(call.headers)
-    flags: list[Flag] = [] if is_attached else ["unattached"]
-    if call.has_streamed_body:
+    flags: list[Flag] = []
+    if not is_attached:
+        flags.append("unattached")
+    elif call.has_streamed_body:
         flags.append("request_body_not_recorded")
     elif call.body:
         body = copy_body(call.body)
@@ -70,18 +72,21 @@ def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload:
     fields: dict[str, JsonValue] = {**status.fields, field_names.ANSWERED: "live"}
     size = status.approximate_size
     if outcome.response is not None:
-        response = _describe_response(outcome.response, outcome.body)
+        recorded_body = outcome.body if is_attached else None
+        response = _describe_response(outcome.response, recorded_body)
         fields[field_names.RESPONSE] = dict(response.fields)
-        fields = _add_flags(fields, _name_response_body_flags(outcome))
+        fields = _add_flags(
+            fields, _name_response_body_flags(recorded_body, outcome.is_body_complete)
+        )
         size += response.approximate_size
     return Payload(fields, size)
 
 
-def _name_response_body_flags(outcome: CallOutcome) -> list[Flag]:
+def _name_response_body_flags(body: CopiedBody | None, is_body_complete: bool) -> list[Flag]:
     flags: list[Flag] = []
-    if outcome.body is not None and outcome.body.is_truncated:
+    if body is not None and body.is_truncated:
         flags.append("response_body_truncated")
-    if not outcome.is_body_complete:
+    if not is_body_complete:
         flags.append("response_body_incomplete")
     return flags
 

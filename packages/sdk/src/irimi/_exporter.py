@@ -14,6 +14,7 @@ from irimi._wire import Event
 QUEUE_LIMIT = 10_000
 QUEUE_SIZE_LIMIT = 64 * 1024 * 1024
 BATCH_SIZE = 100
+BATCH_SIZE_LIMIT = 8 * 1024 * 1024
 SEND_INTERVAL_SECONDS = 1.0
 SEND_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 0.2
@@ -43,12 +44,14 @@ class Exporter:
                 len(self._pending) >= QUEUE_LIMIT
                 or self._pending_size + approximate_size > QUEUE_SIZE_LIMIT
             )
+            pending_size_before = self._pending_size
             if not is_full:
                 self._pending.append((event, approximate_size))
                 self._pending_size += approximate_size
                 self._unsettled_count += 1
                 self._ensure_sender_is_running()
-            if len(self._pending) in (1, BATCH_SIZE):
+            has_reached_size_limit = pending_size_before < BATCH_SIZE_LIMIT <= self._pending_size
+            if len(self._pending) in (1, BATCH_SIZE) or has_reached_size_limit:
                 self._condition.notify_all()
         if is_full:
             self._drops.record(1, "irimi events were dropped: too many are waiting to be sent")
@@ -87,12 +90,21 @@ class Exporter:
         with self._condition:
             self._condition.wait_for(lambda: len(self._pending) > 0)
             self._condition.wait_for(self._is_send_due, SEND_INTERVAL_SECONDS)
-            taken = [self._pending.popleft() for _ in range(min(BATCH_SIZE, len(self._pending)))]
-            self._pending_size -= sum(approximate_size for _, approximate_size in taken)
-            return tuple(event for event, _ in taken)
+            events: list[Event] = []
+            batch_size = 0
+            while self._pending and len(events) < BATCH_SIZE and batch_size < BATCH_SIZE_LIMIT:
+                event, approximate_size = self._pending.popleft()
+                events.append(event)
+                batch_size += approximate_size
+            self._pending_size -= batch_size
+            return tuple(events)
 
     def _is_send_due(self) -> bool:
-        return len(self._pending) >= BATCH_SIZE or self._waiting_flush_count > 0
+        return (
+            len(self._pending) >= BATCH_SIZE
+            or self._pending_size >= BATCH_SIZE_LIMIT
+            or self._waiting_flush_count > 0
+        )
 
     def _deliver(self, batch: tuple[Event, ...]) -> None:
         try:

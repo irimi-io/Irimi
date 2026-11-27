@@ -92,6 +92,27 @@ def test_an_async_client_is_recorded_the_same_way(
     assert [end["response"]["status"] for end in call_ends] == [200, 200]
 
 
+def test_a_call_outside_any_workflow_is_recorded_as_unattached_without_bodies(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    with http_library.Client() as client:
+        client.post(f"{upstream.url}/v1/metrics", json={"cpu": 0.4})
+
+    call_start, call_end = recorded_events()
+
+    assert (call_start["kind"], call_start["seq"], call_start["parent_span_id"]) == (
+        "http",
+        0,
+        None,
+    )
+    assert call_start["flags"] == ["unattached"]
+    assert call_start["request"]["url"] == f"{upstream.url}/v1/metrics"
+    assert "body" not in call_start["request"]
+    assert call_end["response"]["status"] == 200
+    assert "body" not in call_end["response"]
+    assert "events_produced" not in call_end
+
+
 @pytest.mark.parametrize(
     "name",
     [

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+THREE_MEGABYTES = 3 * 1024 * 1024
 APP = """
 import irimi
 
@@ -100,27 +101,61 @@ def test_a_call_that_could_not_be_recorded_counts_as_not_sent(fake_store: Any) -
     assert output == "ch_123\nraised unchanged\nFalse\n"
 
 
-TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER = """
+A_RUN_TOO_LARGE_TO_WAIT = """
 @irimi.workflow
 def measure(text):
     return len(text)
 
-text = "x" * 40_000_000
-measure(text)
-measure(text)
+measure("x" * 70_000_000)
+measure("x")
 print(irimi.flush())
 """
 
 
 def test_events_beyond_the_memory_limit_are_dropped_and_counted(fake_store: Any) -> None:
-    output = run_app(
-        f"irimi.init(store_url={fake_store.url!r})", teardown=TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER
-    )
+    output = run_app(f"irimi.init(store_url={fake_store.url!r})", teardown=A_RUN_TOO_LARGE_TO_WAIT)
 
     starts = [event for event in fake_store.take_events() if event.get("name") == "measure"]
 
     assert output == "ch_123\nFalse\n"
-    assert len(starts) == 1
+    assert [start["input"]["args"] for start in starts] == [["x"]]
+
+
+SIX_LARGE_ANSWERS = """
+import os
+import httpx
+
+@irimi.workflow
+def download_exports():
+    with httpx.Client() as client:
+        for _ in range(6):
+            client.get(os.environ["UPSTREAM_URL"] + "/export")
+
+download_exports()
+print(irimi.flush())
+"""
+
+
+def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
+    fake_store: Any, upstream: Any
+) -> None:
+    upstream.set_answer("/export", chunks=[b"x" * THREE_MEGABYTES])
+
+    output = run_app(
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=SIX_LARGE_ANSWERS,
+        UPSTREAM_URL=upstream.url,
+    )
+
+    bodies_per_batch = [
+        sum("body" in event.get("response", {}) for event in batch["events"])
+        for batch in fake_store.batches
+    ]
+
+    assert output.endswith("True\n")
+    assert len(fake_store.batches) >= 2
+    assert sum(bodies_per_batch) == 6
+    assert max(bodies_per_batch) <= 3
 
 
 def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
