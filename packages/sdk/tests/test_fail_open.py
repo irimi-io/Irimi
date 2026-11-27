@@ -25,10 +25,33 @@ print(handle_ticket("T-1042"))
 """
 
 
+OUTBOUND_APP = """
+import os
+import httpx2
+import irimi
+
+client = httpx2.Client()
+{setup}
+import httpx
+
+@irimi.workflow
+def look_up_both():
+    print(client.get(os.environ["UPSTREAM_URL"] + "/a").text)
+    print(httpx.get(os.environ["UPSTREAM_URL"] + "/b").text)
+
+look_up_both()
+print(irimi.flush())
+"""
+
+
 def run_app(setup: str, teardown: str = "", **environment: str) -> str:
+    return run_script(APP.format(setup=setup, teardown=teardown), **environment)
+
+
+def run_script(script: str, **environment: str) -> str:
     inherited = {name: value for name, value in os.environ.items() if not name.startswith("IRIMI_")}
     completed = subprocess.run(
-        [sys.executable, "-c", APP.format(setup=setup, teardown=teardown)],
+        [sys.executable, "-c", script],
         env={**inherited, **environment},
         capture_output=True,
         text=True,
@@ -179,3 +202,35 @@ def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
     output = run_app(f"irimi.init(store_url={unused_url!r})", teardown="print(irimi.flush())")
 
     assert output == "ch_123\nFalse\n"
+
+
+def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_recorded(
+    fake_store: Any, upstream: Any
+) -> None:
+    output = run_script(
+        OUTBOUND_APP.format(setup=f"irimi.init(store_url={fake_store.url!r})"),
+        UPSTREAM_URL=upstream.url,
+    )
+
+    call_starts = [event for event in fake_store.take_events() if event.get("kind") == "http"]
+
+    assert output == '{"ok": true}\n{"ok": true}\nTrue\n'
+    assert [start["name"] for start in call_starts] == ["GET 127.0.0.1/a", "GET 127.0.0.1/b"]
+
+
+@pytest.mark.parametrize(
+    ("setup", "is_flushed"),
+    [
+        ("", True),
+        ("irimi.init()", True),
+        ("irimi.init(store_url=os.environ['UNUSED_URL'])", False),
+    ],
+)
+def test_outbound_calls_reach_the_app_unchanged_whatever_the_store_does(
+    upstream: Any, unused_url: str, setup: str, is_flushed: bool
+) -> None:
+    output = run_script(
+        OUTBOUND_APP.format(setup=setup), UPSTREAM_URL=upstream.url, UNUSED_URL=unused_url
+    )
+
+    assert output == f'{{"ok": true}}\n{{"ok": true}}\n{is_flushed}\n'

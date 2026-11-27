@@ -6,6 +6,9 @@ import urllib.request
 from typing import Any
 
 APP = """
+import os
+
+import httpx2
 import irimi
 
 irimi.init()
@@ -16,6 +19,7 @@ def record_refund(ticket_id):
 
 @irimi.workflow
 def handle_ticket(ticket):
+    httpx2.get(os.environ["IRIMI_STORE_URL"] + "/api/v1/runs")
     record_refund(ticket["id"])
     return "Refund issued"
 
@@ -37,6 +41,10 @@ def test_a_run_recorded_in_an_app_is_listed_and_shown_by_the_cli(
     run_id = json.loads(listed.stdout)["runs"][0]["id"]
     shown = run_irimi(local_store_url, "runs", run_id, "--json")
     root = json.loads(shown.stdout)["run"]["root"]
+    children = root["children"]
+    call_url = f"{local_store_url}/api/v1/runs/{run_id}/calls/{children[0]['span_id']}"
+    with urllib.request.urlopen(call_url) as answer:
+        call = json.loads(answer.read())["call"]
     table = run_irimi(local_store_url, "runs")
     tree = run_irimi(local_store_url, "runs", run_id)
     with urllib.request.urlopen(f"{local_store_url}/api/v1/runs") as answer:
@@ -44,7 +52,13 @@ def test_a_run_recorded_in_an_app_is_listed_and_shown_by_the_cli(
 
     assert (listed.returncode, shown.returncode, table.returncode, tree.returncode) == (0, 0, 0, 0)
     assert listed.stdout.encode() == store_document
-    assert (root["name"], root["children"][0]["name"]) == ("handle_ticket", "record_refund")
+    assert root["name"] == "handle_ticket"
+    assert [(child["kind"], child["name"]) for child in children] == [
+        ("http", "GET 127.0.0.1/api/v1/runs"),
+        ("function", "record_refund"),
+    ]
+    assert call["response"]["status"] == 200
+    assert call["request"]["url"].endswith("/api/v1/runs")
     assert run_id in table.stdout
     assert "handle_ticket" in table.stdout
     assert tree.stdout.index("handle_ticket") < tree.stdout.index("  function record_refund")
