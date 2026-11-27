@@ -208,7 +208,7 @@ for is a 404, with or without a cursor. The path is defined in the wire module n
 path. (decided 2026-11-26, paging 2026-11-27)
 
 Decided 2026-11-27 for ingest: `id`, `trace_id`, `span_id` and `parent_span_id` are 1 to 128
-letters, digits, `-`, `_`, `.` and `~`, and an event that breaks this is refused on its own. A body
+letters, digits, `-` and `_`, and an event that breaks this is refused on its own. A body
 containing `NaN` or `Infinity` is refused as not JSON.
 
 ### The CLI

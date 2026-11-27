@@ -11,9 +11,10 @@ EVENTS_PATH = f"/{WIRE_VERSION}/events"
 RUN_EVENTS_PATH = f"/{WIRE_VERSION}/runs/{{trace_id}}/events"
 EVENT_FIELD_NAMES = frozenset({"id", "type", "trace_id", "span_id", "time_unix_nano"})
 START_FIELD_NAMES = frozenset({"parent_span_id", "kind", "name", "seq"})
-ID_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_.~")
+ID_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_")
 LARGEST_ID_LENGTH = 128
 LARGEST_WHOLE_NUMBER = 2**63 - 1
+LARGEST_SEQ = 2**53 - 1
 DIGITS_IN_LARGEST_WHOLE_NUMBER = len(str(LARGEST_WHOLE_NUMBER))
 
 
@@ -173,7 +174,7 @@ def _read_id(document: dict[str, JsonValue], name: str, place: str) -> str:
         or not ID_CHARACTERS.issuperset(value)
     ):
         raise WireFormatError(
-            f"{place}.{name}: expected 1 to {LARGEST_ID_LENGTH} of letters, digits, - _ . ~"
+            f"{place}.{name}: expected 1 to {LARGEST_ID_LENGTH} of letters, digits, - and _"
         )
     return value
 
@@ -199,8 +200,8 @@ def _read_seq(document: dict[str, JsonValue], place: str) -> int:
     value = document.get("seq")
     if isinstance(value, bool) or not isinstance(value, int):
         raise WireFormatError(f"{place}.seq: expected a whole number")
-    if abs(value) > LARGEST_WHOLE_NUMBER:
-        raise WireFormatError(f"{place}.seq: expected at most {LARGEST_WHOLE_NUMBER}")
+    if abs(value) > LARGEST_SEQ:
+        raise WireFormatError(f"{place}.seq: expected at most {LARGEST_SEQ}")
     return value
 
 

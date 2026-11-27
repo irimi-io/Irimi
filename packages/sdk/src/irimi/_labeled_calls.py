@@ -52,12 +52,12 @@ def describe_output(output: object) -> Payload:
 
 
 def describe_error(error: BaseException) -> Payload:
-    message = str(error)
+    message = serialise(str(error))
     fields: dict[str, JsonValue] = {
         field_names.STATUS: "error",
-        field_names.ERROR: {"type": name_type(type(error)), "message": message},
+        field_names.ERROR: {"type": name_type(type(error)), "message": message.value},
     }
-    return Payload(fields, len(message))
+    return Payload(fields, message.approximate_size)
 
 
 def _describe_root(

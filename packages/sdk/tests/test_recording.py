@@ -41,7 +41,7 @@ def fail_on_ticket(ticket_id: str) -> None:
 
 
 @irimi.workflow
-def open_session(session: Session) -> Session:
+def open_session(session: object) -> object:
     return session
 
 
@@ -116,17 +116,25 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
     assert run_end["error"] == {"type": "builtins.LookupError", "message": "no ticket T-7"}
 
 
+@pytest.mark.parametrize(
+    ("unserialisable", "type_name"),
+    [
+        (Session(), f"{__name__}.Session"),
+        (float("nan"), "builtins.float"),
+        ("cut \ud83d short", "builtins.str"),
+        ({"cut \ud83d short": 1}, "builtins.dict"),
+    ],
+)
 def test_a_run_with_unserialisable_input_is_recorded_and_flagged(
-    recorded_events: TakeEvents,
+    recorded_events: TakeEvents, unserialisable: object, type_name: str
 ) -> None:
-    session = Session()
-
-    assert open_session(session) is session
+    assert open_session(unserialisable) is unserialisable
 
     run_start, run_end = recorded_events()
 
     assert run_start["flags"] == ["not_replayable"]
     assert run_end["flags"] == ["unserialisable_output"]
+    assert run_end["output"] == {"$irimi": "unserialisable", "type": type_name}
 
 
 def test_a_labeled_function_outside_a_workflow_is_recorded_as_unattached(
