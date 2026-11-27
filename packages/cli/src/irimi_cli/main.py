@@ -3,19 +3,29 @@ import json
 import os
 import sys
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any, TypeVar
 
-from irimi_store.reader_documents import RUN_PATH, RUNS_PATH, parse_run, parse_run_page
+from irimi_store.reader_documents import (
+    RUN_PATH,
+    RUNS_PATH,
+    ReaderDocumentError,
+    parse_run,
+    parse_run_page,
+)
 from irimi_store.server import LOCAL_HOST, serve_local_store
 
 from irimi_cli.printing import print_run_list, print_run_tree
-from irimi_cli.store_client import read_from_store
+from irimi_cli.store_client import StoreError, read_from_store
+
+Answer = TypeVar("Answer")
 
 STORE_URL_VARIABLE = "IRIMI_STORE_URL"
 DEFAULT_STORE_PORT = 7474
 DEFAULT_STORE_DATABASE = Path("irimi-store.db")
 USAGE_ERROR = 2
+STORE_ERROR = 1
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -26,9 +36,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if not store_url:
         print(f"no store address: pass --store-url or set {STORE_URL_VARIABLE}", file=sys.stderr)
         return USAGE_ERROR
-    if options.run_id is None:
-        return _list_runs(store_url, options.limit, options.cursor, options.json)
-    return _show_run(store_url, options.run_id, options.json)
+    try:
+        if options.run_id is None:
+            return _list_runs(store_url, options.limit, options.cursor, options.json)
+        return _show_run(store_url, options.run_id, options.json)
+    except StoreError as error:
+        print(error, file=sys.stderr)
+        return STORE_ERROR
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -60,7 +74,7 @@ def _list_runs(store_url: str, limit: str | None, cursor: str | None, as_json: b
     document = read_from_store(store_url, RUNS_PATH, query)
     if as_json:
         return _write_document(document)
-    print(print_run_list(parse_run_page(json.loads(document))))
+    print(print_run_list(_parse_answer(store_url, document, parse_run_page)))
     return 0
 
 
@@ -69,7 +83,7 @@ def _show_run(store_url: str, run_id: str, as_json: bool) -> int:
     document = read_from_store(store_url, path, {})
     if as_json:
         return _write_document(document)
-    print(print_run_tree(parse_run(json.loads(document))))
+    print(print_run_tree(_parse_answer(store_url, document, parse_run)))
     return 0
 
 
@@ -77,3 +91,10 @@ def _write_document(document: bytes) -> int:
     sys.stdout.buffer.write(document)
     sys.stdout.buffer.flush()
     return 0
+
+
+def _parse_answer(store_url: str, document: bytes, parse: Callable[[Any], Answer]) -> Answer:
+    try:
+        return parse(json.loads(document))
+    except (ReaderDocumentError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise StoreError(f"{store_url} did not answer as a store does: {error}") from error
