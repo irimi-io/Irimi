@@ -1,5 +1,7 @@
 import json
 import os
+import signal
+import sqlite3
 import subprocess
 import sys
 import urllib.request
@@ -62,12 +64,14 @@ def test_a_run_with_gaps_and_odd_values_is_printed(local_store_url: str, run_iri
     assert listed.stdout.splitlines() == ["t1  run  1970-01-01T00:00:00Z  -  -  unfinished"]
 
 
-def test_a_run_whose_id_has_url_characters_is_shown(local_store_url: str, run_irimi: Any) -> None:
-    post_events(local_store_url, start("a b#1", "s1", "run", 100))
+def test_a_run_whose_id_uses_every_kind_of_id_character_is_shown(
+    local_store_url: str, run_irimi: Any
+) -> None:
+    post_events(local_store_url, start("A.b~c-d_1", "s1", "run", 100))
 
-    shown = run_irimi(local_store_url, "runs", "a b#1")
+    shown = run_irimi(local_store_url, "runs", "A.b~c-d_1")
 
-    assert (shown.returncode, shown.stdout.splitlines()[0]) == (0, "run  a b#1  unfinished")
+    assert (shown.returncode, shown.stdout.splitlines()[0]) == (0, "run  A.b~c-d_1  unfinished")
 
 
 def test_the_next_page_is_named(local_store_url: str, run_irimi: Any) -> None:
@@ -154,12 +158,17 @@ def test_a_store_that_cannot_start_says_why_in_one_line(
 ) -> None:
     not_a_database = tmp_path / "notes.txt"
     not_a_database.write_text("not a database " * 100)
+    from_a_newer_store = tmp_path / "newer.db"
+    newer = sqlite3.connect(from_a_newer_store)
+    newer.execute("PRAGMA user_version = 99")
+    newer.close()
     taken_port = local_store_url.rpartition(":")[2]
     attempts = [
         ["--port", taken_port, "--database", str(tmp_path / "other.db")],
         ["--port", "0", "--database", str(tmp_path / "missing" / "store.db")],
         ["--port", "0", "--database", str(not_a_database)],
         ["--port", "99999", "--database", str(tmp_path / "other.db")],
+        ["--port", "0", "--database", str(from_a_newer_store)],
     ]
 
     results = [
@@ -167,5 +176,26 @@ def test_a_store_that_cannot_start_says_why_in_one_line(
         for attempt in attempts
     ]
 
-    assert [(result.stdout, len(result.stderr.splitlines())) for result in results] == [("", 1)] * 4
+    assert [(result.stdout, len(result.stderr.splitlines())) for result in results] == [("", 1)] * 5
     assert all(result.returncode != 0 for result in results)
+
+
+def test_a_store_says_where_it_keeps_runs_and_stops_quietly_when_interrupted(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "store.db"
+    store = subprocess.Popen(
+        [IRIMI, "store", "--port", "0", "--database", database_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert store.stdout is not None
+    started = [store.stdout.readline() for _ in range(3)]
+    urllib.request.urlopen(f"{started[0].strip()}/api/v1/runs", timeout=10).close()
+
+    store.send_signal(signal.SIGINT)
+    _, errors = store.communicate(timeout=30)
+
+    assert str(database_path.resolve()) in started[2]
+    assert (store.returncode, errors) == (0, "")

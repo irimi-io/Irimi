@@ -97,21 +97,23 @@ error, answered with 400.
 
 - **Read a run's events, in pages,** in arrival order. Replaces today's `read_run_events`.
 - **Read one call's events:** every event of one span in one run.
-- **List roots, in pages:** for each root start event, the start, its end event if one arrived, and
-  how many events the store holds for that trace. Takes whether to list runs or unattached calls.
-  Newest first by the start's `time_unix_nano`, ties broken by arrival.
+- **List roots, in pages:** for each run, its root start event, that root's end event if one
+  arrived, and how many start and end events the store holds for that trace. Takes whether to list
+  runs or unattached calls. Newest first by when the store received the root start, not by the
+  app's clock. (decided 2026-11-27)
 
 A root is a start event with no parent. It is an unattached call when its flags include
 `unattached`, and a run otherwise. Kind is not used to tell them apart, because a later writer can
 start a run with a kind other than `workflow`. (proposed)
 
-In SQLite: one new column for "this event is flagged unattached", and indexes for the root list
-and for finding a span's events. `events_produced` needs no column, because it is read from the
+In SQLite: one new column for "this event is flagged unattached", and indexes for the root list,
+for picking a run's root and for finding a span's events. `events_produced` needs no column, because it is read from the
 root's end event, which the list already loads. (proposed)
 
 The table already exists in files made by piece 2, so the schema gets a version (`PRAGMA
 user_version`) and each change is a numbered step that runs once on open. The first step adds the
-column, fills it for existing rows and creates the indexes. (proposed)
+column, fills it for existing rows and creates the indexes. A file whose version is higher than
+the store knows is refused. (decided 2026-11-27)
 
 **Known limit:** a run whose root start never arrived is not in the list. It can still be read by
 id. Listing it would need a scan of every event or the runs table of approach 2. (proposed)
@@ -127,67 +129,70 @@ Pure functions over a run's events.
   - A node with an end but no start has no kind, name, parent or `seq`.
   - A node whose parent is not in the run, and any root after the first, goes in a `detached` list
     beside the tree, with its own children under it.
-- **Fields.** A node has the common core (span id, parent, kind, name, `seq`, start and end time,
-  status, flags) and every other field of its start and end events, flat, as decided for the one
-  node shape. Flags are the union of both events' flags. If the same other field is on both, the
-  end's value is the one shown; the raw read still has both. (proposed)
-- **Other event types.** Events that are neither start nor end are listed on their node as written.
-  (proposed)
+- **Fields.** A node in the tree has only the common core (span id, parent, kind, name, `seq`,
+  start and end time, status, flags) and its children. Every other field of the start and end
+  events, flat, is on the call read. Flags are the union of both events' flags. If the same other
+  field is on both, the end's value is the one shown; the raw read still has both.
+  (decided 2026-11-27)
+- **Other event types.** Events that are neither start nor end are listed on the call read, as
+  written. (decided 2026-11-27)
+- **Depth.** A run nested more than 200 calls deep is not assembled. The tree read answers 422 and
+  names the replay read. (decided 2026-11-27; the number is the builder's)
 - **Conditions.** A list of words, empty when nothing is wrong, so a new condition is an addition
-  and a reader can show one it does not know. (proposed: a list of words, not one field each)
+  and a reader can show one it does not know.
+  - `no_root`: no root start has arrived. Such a run is not in the list. (decided 2026-11-27)
   - `unfinished`: the root has no end.
-  - `incomplete`: the store holds fewer events for the trace, of any type, than the root's end
-    says were produced. (from Notion) It is not known for a run with no root end.
-  - `not_replayable`: the root's flags say so.
+  - `incomplete`: the store holds fewer start and end events for the trace than the root's end
+    says were produced. `events_produced` is the starts and ends the SDK produced by the time the
+    root ended. Known limit: a call that ends after its root can hide a loss. (decided 2026-11-27)
+  - `not_replayable`: the root's start or end flags say so. (decided 2026-11-27)
 
-Conditions are worked out from the root's start, the root's end and the count of events held, and
-nothing else. The list has exactly those three, so one function serves the list and the tree and
-they agree for every run with one root. A trace with more than one root is the exception, below. A structural gap (a missing start, a missing parent, no root) is not a
-condition word: the tree shows it directly, as above. (proposed)
+Conditions are worked out from the root's start, the root's end and the count of starts and ends
+held, and nothing else, so one function serves the list and the tree and they agree. A structural
+gap inside a run (a missing start, a missing parent) is not a condition word: the tree shows it
+directly, as above.
 
-A trace with more than one root start is a writer's mistake. The tree's `root` is the one with the
-lowest `seq`, then the earliest arrival, and the others are in `detached`. The list has a row per
-root span and does not merge them, so its rows for the other roots can state conditions the tree
-does not. A span started twice is one row, made from the start that arrived first. (proposed)
+A trace with more than one root start is a writer's mistake. The run's root is the one with the
+lowest `seq`, then the earliest arrival. The tree puts the others in `detached`, and the list has
+one row for the run, made from that same root. (decided 2026-11-27)
 
 ### Bodies
 
-From Notion: the tree comes without request and response bodies, and a reader fetches them per
-call. In the tree, `request.body` and `response.body` keep their small fields (`encoding`,
-`content_type`) and lose `data` and `json`. The call-by-id read returns the node whole. The names
-`request`, `response`, `body`, `data` and `json` are added to the wire module's field names, where
-optional field names are defined once. (proposed)
-
-Nothing records an HTTP or LLM call until piece 4, so this is tested with the worked-example run
-from Step 1, which the SDK tests already hold as a fixture. A function's `input` and `output` stay
-in the tree.
+The tree carries no bodies, inputs or outputs at all, since its nodes are core fields only. The
+call-by-id read returns the node whole. This goes further than Notion's "the tree comes without
+request and response bodies". (decided 2026-11-27)
 
 ### The reader API (boundary 3)
 
-Under `/api/v1/`, apart from boundary 2's `/v1/`, so the two versions move separately. (proposed;
-shown to Henry, not yet confirmed)
+Under `/api/v1/`, apart from boundary 2's `/v1/`, so the two versions move separately. (decided
+2026-11-26)
 
 | Route | Answers |
 | --- | --- |
 | `GET /api/v1/runs?limit=&cursor=` | `{"runs": [...], "next_cursor": ...}` |
 | `GET /api/v1/runs/{trace_id}` | `{"run": {...}}` |
 | `GET /api/v1/runs/{trace_id}/calls/{span_id}` | `{"call": {...}}` |
-| `GET /api/v1/unattached-calls?limit=&cursor=` | `{"calls": [...], "next_cursor": ...}` |
+| `GET /api/v1/unattached-calls?limit=&cursor=` | `{"runs": [...], "next_cursor": ...}` |
 
 - A run in the list: `id` (the trace id), the root's core fields, `environment`, `mode` and
   `conditions`. No input or output.
 - A run as a tree: `id`, `conditions`, `root` (or null) and `detached`. It is not paged.
-- A call: the node with its bodies and without its children.
+- A call: the node with every field and its other-type events, without its children.
 - An unattached call in the list has the shape of a run in the list. Its tree is read with the run
   route, since an unattached call is its own trace.
 - Times are strings of nanoseconds, as on the wire.
-- A node's keys (proposed; Notion leaves field names to this build): `span_id`,
-  `parent_span_id`, `kind`, `name`, `seq`, `start_time_unix_nano`, `end_time_unix_nano`, `status`,
-  `flags`, `children`, `events` (the other-type events), then every other field flat. A run adds
-  `id` and `conditions`.
+- A tree node's keys: `span_id`, `parent_span_id`, `kind`, `name`, `seq`,
+  `start_time_unix_nano`, `end_time_unix_nano`, `status`, `flags`, `children`. A call has the same
+  without `children`, plus `events` (the other-type events), then every other field flat. A run
+  adds `id` and `conditions`.
 - A core value the store does not have is `null`, never an absent key.
-- If an event carries an unknown field with the name of one of the node's own keys, the node's
-  key wins. The raw read still has the field. (proposed)
+- Top-level names belong to the format. If an event carries an unknown field with the name of one
+  of the node's own keys, the node's key wins. The raw read still has the field.
+  (decided 2026-11-27)
+- A refusal is `{"error": "<sentence>"}`. The sentence is for people and may change; a reader
+  branches on the status code. (decided 2026-11-27)
+- Answers are written with non-ASCII characters escaped, so a string holding half a character is
+  returned as written. (decided 2026-11-27)
 - An id the store holds nothing for is a 404 with `{"error": ...}`. An unknown version under
   `/api/` is a 404 naming the accepted versions, as `/v1/` does today.
 - The document shapes follow the wire module's pattern: frozen dataclasses with a function to
@@ -197,9 +202,14 @@ shown to Henry, not yet confirmed)
 
 `GET /v1/runs/{trace_id}/events?limit=&cursor=` answers `{"events": [...], "next_cursor": ...}`,
 with each event exactly as it was written, in arrival order. It is the batch shape the SDK already
-writes, so the existing batch parser reads it. An id the store holds nothing for is a 404. The path
-is defined in the wire module next to the events path. (proposed; an addition to boundary 2, so it
-needs Henry's OK)
+writes, so the existing batch parser reads it. The cursor is opaque and passed back unchanged; null
+or absent means the end. Page sizes are not part of the contract. An id the store holds nothing
+for is a 404, with or without a cursor. The path is defined in the wire module next to the events
+path. (decided 2026-11-26, paging 2026-11-27)
+
+Decided 2026-11-27 for ingest: `id`, `trace_id`, `span_id` and `parent_span_id` are 1 to 128
+letters, digits, `-`, `_`, `.` and `~`, and an event that breaks this is refused on its own. A body
+containing `NaN` or `Infinity` is refused as not JSON.
 
 ### The CLI
 
@@ -217,8 +227,9 @@ One console script, `irimi`, in `irimi-cli`. Built on `argparse` and `urllib`: n
 - The store's address comes from `--store-url`, else `IRIMI_STORE_URL`. With neither, the command
   fails and says so. There is no default address, as decided for `init`.
 - `irimi store` takes `--port` and `--database`. It calls one function in `irimi-store` that
-  builds the engine and serves the app, so the CLI never imports storage. (proposed: the name
-  `irimi store`, and defaults of port 7474 and `irimi-store.db` in the current directory)
+  builds the engine and serves the app, so the CLI never imports storage. The defaults are port
+  7717 and `irimi-store.db` in the current directory, and the start-up lines give the address and
+  the database path. (decided 2026-11-27)
 - A failure (store unreachable, no such run) prints one line to stderr and exits non-zero.
 - Unattached calls and call-by-id are in the API only. (proposed)
 

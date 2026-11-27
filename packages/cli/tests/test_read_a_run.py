@@ -44,11 +44,7 @@ def test_a_run_recorded_in_an_app_is_listed_and_shown_by_the_cli(
 
     assert (listed.returncode, shown.returncode, table.returncode, tree.returncode) == (0, 0, 0, 0)
     assert listed.stdout.encode() == store_document
-    assert (root["name"], root["output"], root["children"][0]["name"]) == (
-        "handle_ticket",
-        "Refund issued",
-        "record_refund",
-    )
+    assert (root["name"], root["children"][0]["name"]) == ("handle_ticket", "record_refund")
     assert run_id in table.stdout
     assert "handle_ticket" in table.stdout
     assert tree.stdout.index("handle_ticket") < tree.stdout.index("  function record_refund")

@@ -1,9 +1,9 @@
 from irimi._wire import Event
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from irimi_store.answers import JsonAnswer
 from irimi_store.assembly import assemble_call, assemble_run, summarise_root
 from irimi_store.page_requests import read_page_request
 from irimi_store.pages import Page
@@ -18,7 +18,6 @@ from irimi_store.reader_documents import (
     write_refusal,
     write_run,
     write_run_page,
-    write_unattached_call_page,
 )
 from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, RootSet, StorageEngine
 
@@ -40,21 +39,20 @@ def create_reader_routes(storage: StorageEngine) -> list[Route]:
             items=tuple(summarise_root(root) for root in page.items), next_cursor=page.next_cursor
         )
 
-    async def list_runs(request: Request) -> JSONResponse:
-        return JSONResponse(write_run_page(await list_summaries(request, "runs")))
+    async def list_runs(request: Request) -> JsonAnswer:
+        return JsonAnswer(write_run_page(await list_summaries(request, "runs")))
 
-    async def list_unattached_calls(request: Request) -> JSONResponse:
-        page = await list_summaries(request, "unattached_calls")
-        return JSONResponse(write_unattached_call_page(page))
+    async def list_unattached_calls(request: Request) -> JsonAnswer:
+        return JsonAnswer(write_run_page(await list_summaries(request, "unattached_calls")))
 
-    async def read_run(request: Request) -> JSONResponse:
+    async def read_run(request: Request) -> JsonAnswer:
         trace_id: str = request.path_params["trace_id"]
         events = await run_in_threadpool(_read_every_run_event, storage, trace_id)
         if not events:
             raise NotHeldError(f"no run with id {trace_id}")
-        return JSONResponse(write_run(assemble_run(trace_id, events)))
+        return JsonAnswer(write_run(assemble_run(trace_id, events)))
 
-    async def read_call(request: Request) -> JSONResponse:
+    async def read_call(request: Request) -> JsonAnswer:
         trace_id: str = request.path_params["trace_id"]
         span_id: str = request.path_params["span_id"]
         events = await run_in_threadpool(
@@ -63,7 +61,7 @@ def create_reader_routes(storage: StorageEngine) -> list[Route]:
         call = assemble_call(events)
         if call is None:
             raise NotHeldError(f"no call with id {span_id} in run {trace_id}")
-        return JSONResponse(write_call(call))
+        return JsonAnswer(write_call(call))
 
     return [
         Route(RUNS_PATH, list_runs, methods=["GET"]),
@@ -85,12 +83,12 @@ def _read_every_run_event(storage: StorageEngine, trace_id: str) -> tuple[Event,
             return tuple(events)
 
 
-async def refuse_unknown_reader_api_path(request: Request) -> JSONResponse:
+async def refuse_unknown_reader_api_path(request: Request) -> JsonAnswer:
     version = request.path_params["version"]
     if version in ACCEPTED_READER_API_VERSIONS:
         refusal = write_refusal(f"nothing is served at {request.url.path}")
-        return JSONResponse(refusal, status_code=404)
-    return JSONResponse(
+        return JsonAnswer(refusal, status_code=404)
+    return JsonAnswer(
         {
             **write_refusal(f"unknown reader API version: {version}"),
             "accepted_versions": list(ACCEPTED_READER_API_VERSIONS),

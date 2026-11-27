@@ -26,17 +26,18 @@ SELECT_ROOTS = f"""
 SELECT {EVENT_COLUMNS}, arrival, (
     SELECT COUNT(*) FROM events held
     WHERE held.project = events.project AND held.trace_id = events.trace_id
+        AND held.type IN ('start', 'end')
 )
 FROM events
 WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NULL
-    AND (time_unix_nano, arrival) < (?, ?)
+    AND arrival < ?
     AND NOT EXISTS (
-        SELECT 1 FROM events earlier
-        WHERE earlier.project = events.project AND earlier.trace_id = events.trace_id
-            AND earlier.span_id = events.span_id AND earlier.type = 'start'
-            AND earlier.arrival < events.arrival
+        SELECT 1 FROM events other
+        WHERE other.project = events.project AND other.trace_id = events.trace_id
+            AND other.type = 'start' AND other.parent_span_id IS NULL
+            AND (other.seq, other.arrival) < (events.seq, events.arrival)
     )
-ORDER BY time_unix_nano DESC, arrival DESC LIMIT ?
+ORDER BY arrival DESC LIMIT ?
 """
 SELECT_SPAN_EVENTS = f"""
 SELECT {EVENT_COLUMNS} FROM events
@@ -46,7 +47,6 @@ SELECT_SPAN_END = f"""
 SELECT {EVENT_COLUMNS} FROM events
 WHERE project = ? AND trace_id = ? AND span_id = ? AND type = 'end' ORDER BY arrival LIMIT 1
 """
-NEWEST_ROOT_POSITION = (LARGEST_WHOLE_NUMBER, LARGEST_WHOLE_NUMBER)
 
 EventRow = tuple[str, str, str, str, int, str | None, str | None, str | None, int | None, str]
 ArrivedEventRow = tuple[
@@ -87,7 +87,7 @@ class SqliteStorageEngine:
     def read_run_events(
         self, project: str, trace_id: str, cursor: str | None, limit: int
     ) -> Page[Event]:
-        after_arrival = _read_arrival_cursor(cursor)
+        after_arrival = _read_arrival_cursor(cursor, 0)
         with self._open_connection() as connection:
             rows: list[ArrivedEventRow] = connection.execute(
                 SELECT_RUN_EVENTS, (project, trace_id, after_arrival, limit + 1)
@@ -108,16 +108,16 @@ class SqliteStorageEngine:
     def list_roots(
         self, project: str, root_set: RootSet, cursor: str | None, limit: int
     ) -> Page[StoredRoot]:
-        before = _read_root_cursor(cursor)
+        before_arrival = _read_arrival_cursor(cursor, LARGEST_WHOLE_NUMBER)
         with self._open_connection() as connection:
             rows: list[RootRow] = connection.execute(
-                SELECT_ROOTS, (project, root_set == "unattached_calls", *before, limit + 1)
+                SELECT_ROOTS, (project, root_set == "unattached_calls", before_arrival, limit + 1)
             ).fetchall()
             shown = rows[:limit]
             roots = tuple(_read_root(connection, project, row) for row in shown)
         return Page(
             items=roots,
-            next_cursor=f"{shown[-1][4]}-{shown[-1][10]}" if len(rows) > limit else None,
+            next_cursor=str(shown[-1][10]) if len(rows) > limit else None,
         )
 
     @contextmanager
@@ -126,24 +126,15 @@ class SqliteStorageEngine:
             yield connection
 
 
-def _read_arrival_cursor(cursor: str | None) -> int:
-    return 0 if cursor is None else _read_cursor_number(cursor)
-
-
-def _read_root_cursor(cursor: str | None) -> tuple[int, int]:
+def _read_arrival_cursor(cursor: str | None, arrival_on_the_first_page: int) -> int:
     if cursor is None:
-        return NEWEST_ROOT_POSITION
-    time_unix_nano, _, arrival = cursor.partition("-")
-    return _read_cursor_number(time_unix_nano), _read_cursor_number(arrival)
-
-
-def _read_cursor_number(text: str) -> int:
-    is_whole_number = text.isascii() and text.isdigit()
-    if not is_whole_number or len(text) > DIGITS_IN_LARGEST_WHOLE_NUMBER:
+        return arrival_on_the_first_page
+    is_whole_number = cursor.isascii() and cursor.isdigit()
+    if not is_whole_number or len(cursor) > DIGITS_IN_LARGEST_WHOLE_NUMBER:
         raise InvalidCursorError("cursor: not one this store issued")
-    if int(text) > LARGEST_WHOLE_NUMBER:
+    if int(cursor) > LARGEST_WHOLE_NUMBER:
         raise InvalidCursorError("cursor: not one this store issued")
-    return int(text)
+    return int(cursor)
 
 
 def _read_root(connection: sqlite3.Connection, project: str, row: RootRow) -> StoredRoot:

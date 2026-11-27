@@ -7,10 +7,22 @@ import pytest
 RECORDED_RUN = json.loads(
     (Path(__file__).parents[2] / "sdk/tests/fixtures/recorded_run.json").read_text()
 )
-JSON_BODY_WITHOUT_CONTENT = {"encoding": "text", "content_type": "application/json"}
+TREE_NODE_KEYS = {
+    "span_id",
+    "parent_span_id",
+    "kind",
+    "name",
+    "seq",
+    "start_time_unix_nano",
+    "end_time_unix_nano",
+    "status",
+    "flags",
+    "children",
+}
 CONDITION_CASES = [
     ([{"events_produced": 3}], {}, ["incomplete"]),
     ([{"events_produced": 2}], {"flags": ["not_replayable"]}, ["not_replayable"]),
+    ([{"flags": ["not_replayable"]}], {}, ["not_replayable"]),
     ([{"events_produced": "2"}], {"flags": "not_replayable"}, []),
     ([], {}, ["unfinished"]),
 ]
@@ -44,38 +56,28 @@ def end(trace: str, span: str, time: int, **fields: Any) -> dict[str, Any]:
     }
 
 
-def test_a_run_is_read_as_a_tree_without_bodies(store: Any) -> None:
+def test_a_run_is_read_as_a_tree_of_core_fields_only(store: Any) -> None:
     store.post("/v1/events", RECORDED_RUN)
 
     status, answer = store.get("/api/v1/runs/t7c1")
     run = answer["run"]
     root = run["root"]
-    llm, http, function = root["children"]
+    function = root["children"][2]
 
     assert (status, run["id"], run["conditions"], run["detached"]) == (200, "t7c1", [], [])
-    assert (root["name"], root["status"], root["output"]) == (
-        "handle_ticket",
-        "ok",
-        "Refund issued",
-    )
-    assert (root["start_time_unix_nano"], root["parent_span_id"]) == ("1795341600000000000", None)
+    assert root.keys() == function.keys() == TREE_NODE_KEYS
+    assert (root["name"], root["status"], root["parent_span_id"]) == ("handle_ticket", "ok", None)
+    assert root["start_time_unix_nano"] == "1795341600000000000"
     assert [(child["kind"], child["seq"]) for child in root["children"]] == [
         ("llm", 1),
         ("http", 2),
         ("function", 3),
     ]
-    assert llm["request"]["body"] == JSON_BODY_WITHOUT_CONTENT
-    assert http["response"]["body"] == JSON_BODY_WITHOUT_CONTENT
-    assert http["request"]["headers"]["Authorization"] == {
-        "$irimi": "redacted",
-        "reason": "credential",
-    }
-    assert (function["write"], function["output"], function["end_time_unix_nano"]) == (
-        True,
-        {"row_id": 9917},
+    assert (function["end_time_unix_nano"], function["children"], function["flags"]) == (
         "1795341602330000000",
+        [],
+        [],
     )
-    assert (function["children"], function["events"], function["flags"]) == ([], [], [])
 
 
 def test_a_call_is_read_with_its_bodies(store: Any) -> None:
@@ -86,7 +88,11 @@ def test_a_call_is_read_with_its_bodies(store: Any) -> None:
     assert status == 200
     assert answer["call"]["name"] == "POST api.stripe.com/v1/refunds"
     assert answer["call"]["response"]["body"]["json"] == {"id": "re_456", "status": "succeeded"}
-    assert "children" not in answer["call"]
+    assert answer["call"]["request"]["headers"]["Authorization"] == {
+        "$irimi": "redacted",
+        "reason": "credential",
+    }
+    assert (answer["call"]["events"], "children" in answer["call"]) == ([], False)
 
 
 def test_events_in_any_order_and_repeated_make_the_same_tree(store: Any) -> None:
@@ -156,11 +162,11 @@ def test_unknown_fields_event_types_and_values_are_kept(store: Any) -> None:
         },
     )
 
-    root = store.get("/api/v1/runs/t1")[1]["run"]["root"]
+    call = store.get("/api/v1/runs/t1/calls/s1")[1]["call"]
 
-    assert (root["name"], root["added_later"], root["status"]) == ("run", {"a": [1]}, 7)
-    assert (root["children"], root["flags"]) == ([], ["unserialisable_output"])
-    assert root["events"] == [note, second_start]
+    assert (call["name"], call["added_later"], call["status"]) == ("run", {"a": [1]}, 7)
+    assert ("children" in call, call["flags"]) == (False, ["unserialisable_output"])
+    assert call["events"] == [note, second_start]
 
 
 def test_a_second_root_in_one_run_is_detached(store: Any) -> None:
@@ -184,11 +190,43 @@ def test_what_the_store_does_not_hold_is_not_found(store: Any, path: str) -> Non
     assert (status, bool(answer["error"])) == (404, True)
 
 
-def test_ids_with_url_characters_are_read(store: Any) -> None:
-    store.post("/v1/events", {"events": [start("a b#1", "s?1", "run", 100)]})
+def test_a_run_whose_root_never_arrived_says_so_and_is_not_listed(store: Any) -> None:
+    store.post("/v1/events", {"events": [start("t1", "s2", "step", 110, parent="s1")]})
 
-    assert store.get("/api/v1/runs/a%20b%231")[1]["run"]["root"]["span_id"] == "s?1"
-    assert store.get("/api/v1/runs/a%20b%231/calls/s%3F1")[0] == 200
+    run = store.get("/api/v1/runs/t1")[1]["run"]
+
+    assert (run["conditions"], run["root"]) == (["no_root"], None)
+    assert [node["span_id"] for node in run["detached"]] == ["s2"]
+    assert store.get("/api/v1/runs")[1]["runs"] == []
+
+
+def test_a_run_nested_too_deeply_is_refused_as_a_tree_and_still_read_as_events(
+    store: Any,
+) -> None:
+    spans = [f"s{depth}" for depth in range(600)]
+    nested = [
+        start("t1", span, "step", 100, parent=parent)
+        for span, parent in zip(spans, [None, *spans], strict=False)
+    ]
+    store.post("/v1/events", {"events": nested})
+
+    status, answer = store.get("/api/v1/runs/t1")
+
+    assert (status, "/v1/runs/t1/events" in answer["error"]) == (422, True)
+    assert store.get("/v1/runs/t1/events?limit=1")[0] == 200
+
+
+def test_only_starts_and_ends_count_towards_what_a_run_holds(store: Any) -> None:
+    note = {**end("t1", "s1", 120), "id": "n1", "type": "added_later"}
+    store.post(
+        "/v1/events",
+        {"events": [start("t1", "s1", "run", 100), end("t1", "s1", 150, events_produced=3), note]},
+    )
+
+    listed = store.get("/api/v1/runs")[1]["runs"][0]["conditions"]
+    tree = store.get("/api/v1/runs/t1")[1]["run"]["conditions"]
+
+    assert listed == tree == ["incomplete"]
 
 
 @pytest.mark.parametrize(("root_ends", "start_fields", "conditions"), CONDITION_CASES)

@@ -4,6 +4,7 @@ import os
 import sys
 import urllib.parse
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -22,7 +23,7 @@ from irimi_cli.store_client import StoreError, read_from_store
 Answer = TypeVar("Answer")
 
 STORE_URL_VARIABLE = "IRIMI_STORE_URL"
-DEFAULT_STORE_PORT = 7474
+DEFAULT_STORE_PORT = 7717
 DEFAULT_STORE_DATABASE = Path("irimi-store.db")
 USAGE_ERROR = 2
 STORE_ERROR = 1
@@ -42,7 +43,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
 def _run_command(options: argparse.Namespace) -> int:
     if options.command == "store":
-        serve_local_store(options.database, options.port, _announce_store)
+        serve_local_store(
+            options.database, options.port, partial(_announce_store, options.database)
+        )
         return 0
     store_url = options.store_url or os.environ.get(STORE_URL_VARIABLE)
     if not store_url:
@@ -68,9 +71,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _announce_store(store_url: str) -> None:
+def _announce_store(database_path: Path, store_url: str) -> None:
     how_to_use_it = f"set {STORE_URL_VARIABLE}={store_url} to record to this store and read from it"
-    _write_text(f"{store_url}\n{how_to_use_it}")
+    _write_text(f"{store_url}\n{how_to_use_it}\nkeeping runs in {database_path.resolve()}")
 
 
 def _list_runs(store_url: str, limit: str | None, cursor: str | None, as_json: bool) -> int:
@@ -98,9 +101,7 @@ def _print_answer(
 ) -> str:
     try:
         return print_answer(parse(json.loads(document)))
-    except RecursionError as error:
-        raise StoreError("the answer is nested too deeply to print; use --json") from error
-    except (ReaderDocumentError, ValueError, OverflowError) as error:
+    except (ReaderDocumentError, ValueError, OverflowError, OSError, RecursionError) as error:
         raise StoreError(f"{store_url} did not answer as a store does: {error}") from error
 
 

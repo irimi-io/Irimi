@@ -45,10 +45,25 @@ def test_a_run_is_read_back_as_written_in_pages_that_hold_while_events_arrive(
     assert second == {"events": [RUN_NOTE, LATE_NOTE], "next_cursor": None}
 
 
-def test_reading_a_run_the_store_does_not_hold_is_not_found(store: Any) -> None:
-    status, answer = store.get("/v1/runs/missing/events")
+@pytest.mark.parametrize("query", ["", "?cursor=5"])
+def test_reading_a_run_the_store_does_not_hold_is_not_found(store: Any, query: str) -> None:
+    store.post("/v1/events", {"events": [RUN_START]})
+
+    status, answer = store.get(f"/v1/runs/missing/events{query}")
 
     assert (status, bool(answer["error"])) == (404, True)
+
+
+def test_a_cursor_past_the_end_of_a_held_run_reads_an_empty_page(store: Any) -> None:
+    store.post("/v1/events", {"events": [RUN_START]})
+
+    assert store.get("/v1/runs/t7c1/events?cursor=5") == (200, {"events": [], "next_cursor": None})
+
+
+def test_a_read_under_an_unknown_version_is_refused_with_the_accepted_versions(store: Any) -> None:
+    status, answer = store.get("/v2/runs/t7c1/events")
+
+    assert (status, answer["accepted_versions"]) == (404, ["v1"])
 
 
 @pytest.mark.parametrize(
