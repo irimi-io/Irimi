@@ -8,7 +8,7 @@ from irimi._bodies import CopiedBody, copy_body, describe_body
 from irimi._credential_headers import replace_credential_values
 from irimi._errors import describe_error
 from irimi._recording import Payload
-from irimi._wire import JsonValue, field_names, write_flags
+from irimi._wire import Flag, JsonValue, field_names, write_flags
 
 Headers = tuple[tuple[str, str], ...]
 
@@ -48,14 +48,17 @@ def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
         "headers": replace_credential_values(call.headers),
     }
     size = len(call.url) + _measure_header_values(call.headers)
-    if call.body:
+    flags: list[Flag] = [] if is_attached else ["unattached"]
+    if call.has_streamed_body:
+        flags.append("request_body_not_recorded")
+    elif call.body:
         body = copy_body(call.body)
         request["body"] = _describe_body(body, call.headers)
         size += len(body.content)
+        if body.is_truncated:
+            flags.append("request_body_truncated")
     fields: dict[str, JsonValue] = {field_names.REQUEST: request}
-    if not is_attached:
-        fields[field_names.FLAGS] = write_flags("unattached")
-    return Payload(fields, size)
+    return Payload(_add_flags(fields, flags), size)
 
 
 def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload:
@@ -69,8 +72,24 @@ def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload:
     if outcome.response is not None:
         response = _describe_response(outcome.response, outcome.body)
         fields[field_names.RESPONSE] = dict(response.fields)
+        fields = _add_flags(fields, _name_response_body_flags(outcome))
         size += response.approximate_size
     return Payload(fields, size)
+
+
+def _name_response_body_flags(outcome: CallOutcome) -> list[Flag]:
+    flags: list[Flag] = []
+    if outcome.body is not None and outcome.body.is_truncated:
+        flags.append("response_body_truncated")
+    if not outcome.is_body_complete:
+        flags.append("response_body_incomplete")
+    return flags
+
+
+def _add_flags(fields: dict[str, JsonValue], flags: list[Flag]) -> dict[str, JsonValue]:
+    if not flags:
+        return fields
+    return {**fields, field_names.FLAGS: write_flags(*flags)}
 
 
 def _describe_response(response: OutboundResponse, body: CopiedBody | None) -> Payload:

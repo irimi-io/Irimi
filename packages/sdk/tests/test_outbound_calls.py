@@ -10,8 +10,6 @@ import irimi
 import pytest
 from irimi._wire import parse_batch
 
-from .conftest import FakeUpstream, UpstreamAnswer
-
 TakeEvents = Callable[[], list[dict[str, Any]]]
 REDACTED = {"$irimi": "redacted", "reason": "credential"}
 
@@ -28,9 +26,9 @@ def note_refund(refund: dict[str, Any]) -> str:
 
 
 def test_an_outbound_call_is_recorded_as_a_step_of_its_run(
-    recorded_events: TakeEvents, upstream: FakeUpstream, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:
-    upstream.answers["/v1/refunds"] = UpstreamAnswer(chunks=[b'{"id": "re_456"}'])
+    upstream.set_answer("/v1/refunds", chunks=[b'{"id": "re_456"}'])
 
     @irimi.workflow
     def refund_ticket(amount: int) -> str:
@@ -71,7 +69,7 @@ def test_an_outbound_call_is_recorded_as_a_step_of_its_run(
 
 
 def test_an_async_client_is_recorded_the_same_way(
-    recorded_events: TakeEvents, upstream: FakeUpstream, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:
     @irimi.workflow
     async def look_up_both() -> list[int]:
@@ -118,14 +116,15 @@ def test_an_async_client_is_recorded_the_same_way(
     ],
 )
 def test_the_value_of_a_credential_header_is_never_recorded(
-    recorded_events: TakeEvents, upstream: FakeUpstream, http_library: Any, name: str
+    recorded_events: TakeEvents, upstream: Any, http_library: Any, name: str
 ) -> None:
-    upstream.answers["/charges"] = UpstreamAnswer(
+    upstream.set_answer(
+        "/charges",
         headers=[
             ("Set-Cookie", "session=abc"),
             ("Set-Cookie", "session=abc"),
             ("X-Note", "caf\xe9"),
-        ]
+        ],
     )
 
     @irimi.workflow
@@ -152,9 +151,9 @@ def test_the_value_of_a_credential_header_is_never_recorded(
 
 
 def test_a_header_sent_twice_is_recorded_once_with_its_values_joined(
-    recorded_events: TakeEvents, upstream: FakeUpstream, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:
-    upstream.answers["/catalog"] = UpstreamAnswer(headers=[("Vary", "Accept"), ("Vary", "Origin")])
+    upstream.set_answer("/catalog", headers=[("Vary", "Accept"), ("Vary", "Origin")])
 
     @irimi.workflow
     def read_catalog() -> int:

@@ -1,5 +1,4 @@
 import os
-import socket
 import subprocess
 import sys
 from typing import Any
@@ -35,12 +34,6 @@ def run_app(setup: str, teardown: str = "", **environment: str) -> str:
         check=True,
     )
     return completed.stdout
-
-
-def unused_store_url() -> str:
-    with socket.socket() as unused:
-        unused.bind(("127.0.0.1", 0))
-        return f"http://127.0.0.1:{unused.getsockname()[1]}"
 
 
 def test_importing_irimi_does_not_load_the_modules_only_sending_needs() -> None:
@@ -130,9 +123,7 @@ def test_events_beyond_the_memory_limit_are_dropped_and_counted(fake_store: Any)
     assert len(starts) == 1
 
 
-def test_an_unreachable_store_never_affects_the_app() -> None:
-    output = run_app(
-        f"irimi.init(store_url={unused_store_url()!r})", teardown="print(irimi.flush())"
-    )
+def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
+    output = run_app(f"irimi.init(store_url={unused_url!r})", teardown="print(irimi.flush())")
 
     assert output == "ch_123\nFalse\n"

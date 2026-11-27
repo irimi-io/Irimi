@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import ModuleType
 from typing import Any
 
-from irimi._bodies import copy_body
+from irimi._bodies import BodyCopy
 from irimi._interception import Interception, OpenCall
 from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundResponse
 
@@ -21,8 +21,10 @@ PATCH_TARGETS = (
 def patch_httpx(library: ModuleType, interception: Interception) -> bool:
     if not all(_find_attribute(library, path) is not None for path in PATCH_TARGETS):
         return False
-    _patch_sync_transport(library, interception)
-    _patch_async_transport(library, interception)
+    handle_request = _wrap_sync_transport(library, interception)
+    handle_async_request = _wrap_async_transport(library, interception)
+    library.HTTPTransport.handle_request = handle_request
+    library.AsyncHTTPTransport.handle_async_request = handle_async_request
     return True
 
 
@@ -33,34 +35,29 @@ class _ResponseRecording:
         self._interception = interception
         self._open_call = open_call
         self._response = response
-        self._chunks: list[bytes] = []
+        self._body = BodyCopy()
         self._is_ended = False
 
     def add(self, chunk: bytes) -> None:
-        try:
-            self._chunks.append(chunk)
-        except Exception:
-            self._is_ended = True
-            self._interception.report_failure("copy an outbound response")
+        self._body.add(chunk)
 
-    def end(self, is_body_complete: bool) -> None:
+    def end(self, is_body_complete: bool, error: BaseException | None) -> None:
         if self._is_ended:
             return
         self._is_ended = True
-        try:
-            body = copy_body(b"".join(self._chunks))
-        except Exception:
-            self._interception.report_failure("copy an outbound response")
-            return
         outcome = CallOutcome(
-            response=self._response, body=body, is_body_complete=is_body_complete, error=None
+            response=self._response,
+            body=self._body.take(),
+            is_body_complete=is_body_complete,
+            error=error,
         )
         self._interception.end(self._open_call, outcome)
 
 
-def _patch_sync_transport(library: ModuleType, interception: Interception) -> None:
-    transport_class = library.HTTPTransport
-    send_request = transport_class.handle_request
+def _wrap_sync_transport(
+    library: ModuleType, interception: Interception
+) -> Callable[[object, Any], Any]:
+    send_request = library.HTTPTransport.handle_request
     stream_class = type(
         "RecordingSyncByteStream",
         (library.SyncByteStream,),
@@ -70,16 +67,21 @@ def _patch_sync_transport(library: ModuleType, interception: Interception) -> No
     @functools.wraps(send_request)
     def handle_request(transport: object, request: Any) -> Any:
         open_call = _begin_call(interception, request, library.RequestNotRead)
-        response = send_request(transport, request)
+        try:
+            response = send_request(transport, request)
+        except BaseException as error:
+            _end_without_response(interception, open_call, error)
+            raise
         _record_response(interception, open_call, response, stream_class)
         return response
 
-    transport_class.handle_request = handle_request
+    return handle_request
 
 
-def _patch_async_transport(library: ModuleType, interception: Interception) -> None:
-    transport_class = library.AsyncHTTPTransport
-    send_request = transport_class.handle_async_request
+def _wrap_async_transport(
+    library: ModuleType, interception: Interception
+) -> Callable[[object, Any], Awaitable[Any]]:
+    send_request = library.AsyncHTTPTransport.handle_async_request
     stream_class = type(
         "RecordingAsyncByteStream",
         (library.AsyncByteStream,),
@@ -93,11 +95,15 @@ def _patch_async_transport(library: ModuleType, interception: Interception) -> N
     @functools.wraps(send_request)
     async def handle_async_request(transport: object, request: Any) -> Any:
         open_call = _begin_call(interception, request, library.RequestNotRead)
-        response = await send_request(transport, request)
+        try:
+            response = await send_request(transport, request)
+        except BaseException as error:
+            _end_without_response(interception, open_call, error)
+            raise
         _record_response(interception, open_call, response, stream_class)
         return response
 
-    transport_class.handle_async_request = handle_async_request
+    return handle_async_request
 
 
 def _begin_call(interception: Interception, request: Any, request_not_read: Any) -> OpenCall | None:
@@ -107,6 +113,13 @@ def _begin_call(interception: Interception, request: Any, request_not_read: Any)
         interception.report_failure("read an outbound request")
         return None
     return interception.begin(call)
+
+
+def _end_without_response(
+    interception: Interception, open_call: OpenCall | None, error: BaseException
+) -> None:
+    outcome = CallOutcome(response=None, body=None, is_body_complete=False, error=error)
+    interception.end(open_call, outcome)
 
 
 def _record_response(
@@ -155,26 +168,38 @@ def _hold_stream(stream: Any, inner_stream: Any, recording: _ResponseRecording) 
 
 
 def _iterate_sync_stream(stream: Any) -> Iterator[bytes]:
-    for chunk in stream.inner_stream:
-        stream.recording.add(chunk)
-        yield chunk
-    stream.recording.end(is_body_complete=True)
+    try:
+        for chunk in stream.inner_stream:
+            stream.recording.add(chunk)
+            yield chunk
+    except GeneratorExit:
+        raise
+    except BaseException as error:
+        stream.recording.end(is_body_complete=False, error=error)
+        raise
+    stream.recording.end(is_body_complete=True, error=None)
 
 
 def _close_sync_stream(stream: Any) -> None:
-    stream.recording.end(is_body_complete=False)
+    stream.recording.end(is_body_complete=False, error=None)
     stream.inner_stream.close()
 
 
 async def _iterate_async_stream(stream: Any) -> AsyncIterator[bytes]:
-    async for chunk in stream.inner_stream:
-        stream.recording.add(chunk)
-        yield chunk
-    stream.recording.end(is_body_complete=True)
+    try:
+        async for chunk in stream.inner_stream:
+            stream.recording.add(chunk)
+            yield chunk
+    except GeneratorExit:
+        raise
+    except BaseException as error:
+        stream.recording.end(is_body_complete=False, error=error)
+        raise
+    stream.recording.end(is_body_complete=True, error=None)
 
 
 async def _close_async_stream(stream: Any) -> None:
-    stream.recording.end(is_body_complete=False)
+    stream.recording.end(is_body_complete=False, error=None)
     await stream.inner_stream.aclose()
 
 

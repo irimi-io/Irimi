@@ -1,5 +1,6 @@
 import importlib
 import json
+import socket
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -66,7 +67,7 @@ class UpstreamAnswer:
 
 class FakeUpstream:
     def __init__(self) -> None:
-        self.answers: dict[str, UpstreamAnswer] = {}
+        self._answers: dict[str, UpstreamAnswer] = {}
         self.requests: list[tuple[str, str, bytes]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         threading.Thread(
@@ -76,6 +77,9 @@ class FakeUpstream:
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self._server.server_port}"
+
+    def set_answer(self, path: str, **answer_fields: Any) -> None:
+        self._answers[path] = UpstreamAnswer(**answer_fields)
 
     def close(self) -> None:
         self._server.shutdown()
@@ -90,11 +94,11 @@ class FakeUpstream:
             def answer(self) -> None:
                 path = urlsplit(self.path).path
                 upstream.requests.append((self.command, path, self._read_body()))
-                answer = upstream.answers.get(path, UpstreamAnswer())
+                answer = upstream._answers.get(path, UpstreamAnswer())
                 self.send_response(answer.status)
                 for name, value in answer.headers:
                     self.send_header(name, value)
-                if len(answer.chunks) > 1:
+                if answer.breaks_off or len(answer.chunks) > 1:
                     self._send_chunked(answer)
                 else:
                     self._send_whole(b"".join(answer.chunks))
@@ -121,6 +125,12 @@ class FakeUpstream:
             def _send_chunked(self, answer: UpstreamAnswer) -> None:
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                try:
+                    self._write_chunks(answer)
+                except ConnectionError:
+                    self.close_connection = True
+
+            def _write_chunks(self, answer: UpstreamAnswer) -> None:
                 for chunk in answer.chunks:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                     self.wfile.flush()
@@ -147,6 +157,13 @@ def upstream() -> Iterator[FakeUpstream]:
 @pytest.fixture(params=["httpx", "httpx2"])
 def http_library(request: pytest.FixtureRequest) -> Any:
     return importlib.import_module(request.param)
+
+
+@pytest.fixture
+def unused_url() -> str:
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{unused.getsockname()[1]}"
 
 
 @pytest.fixture
