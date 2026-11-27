@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from irimi._httpx_patch import patch_httpx
 from irimi._interception import Interception
@@ -13,6 +14,8 @@ LIBRARY_NAMES = ("httpx", "httpx2", "urllib3", "aiohttp")
 LIBRARIES_LIKE_HTTPX = frozenset({"httpx", "httpx2"})
 UNPATCHED_WARNING = "irimi could not patch %s, so calls made through it are not recorded"
 
+PatchResult = Literal["patched", "unpatched", "not_installed"]
+
 
 @dataclass(frozen=True)
 class PatchReport:
@@ -21,26 +24,24 @@ class PatchReport:
 
 
 def patch_installed_libraries(interception: Interception) -> PatchReport:
-    patched: list[str] = []
-    unpatched: list[str] = []
-    for name in LIBRARY_NAMES:
-        if importlib.util.find_spec(name) is None:
-            continue
-        if _patch_library(name, interception):
-            patched.append(name)
-        else:
-            unpatched.append(name)
-    return PatchReport(patched=tuple(patched), unpatched=tuple(unpatched))
+    results = {name: _patch_library(name, interception) for name in LIBRARY_NAMES}
+    return PatchReport(
+        patched=tuple(name for name, result in results.items() if result == "patched"),
+        unpatched=tuple(name for name, result in results.items() if result == "unpatched"),
+    )
 
 
-def _patch_library(name: str, interception: Interception) -> bool:
-    if name not in LIBRARIES_LIKE_HTTPX:
-        return False
+def _patch_library(name: str, interception: Interception) -> PatchResult:
     try:
+        if importlib.util.find_spec(name) is None:
+            return "not_installed"
+        if name not in LIBRARIES_LIKE_HTTPX:
+            return "unpatched"
         is_patched = patch_httpx(importlib.import_module(name), interception)
     except Exception:
         logger.warning(UNPATCHED_WARNING, name, exc_info=True)
-        return False
+        return "unpatched"
     if not is_patched:
         logger.warning(UNPATCHED_WARNING, name)
-    return is_patched
+        return "unpatched"
+    return "patched"
