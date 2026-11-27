@@ -32,6 +32,10 @@ WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NU
     AND (time_unix_nano, arrival) < (?, ?)
 ORDER BY time_unix_nano DESC, arrival DESC LIMIT ?
 """
+SELECT_SPAN_EVENTS = f"""
+SELECT {EVENT_COLUMNS} FROM events
+WHERE project = ? AND trace_id = ? AND span_id = ? ORDER BY arrival
+"""
 SELECT_SPAN_END = f"""
 SELECT {EVENT_COLUMNS} FROM events
 WHERE project = ? AND trace_id = ? AND span_id = ? AND type = 'end' ORDER BY arrival LIMIT 1
@@ -89,6 +93,13 @@ class SqliteStorageEngine:
             items=tuple(_read_event(row[:10]) for row in shown),
             next_cursor=str(shown[-1][10]) if len(rows) > limit else None,
         )
+
+    def read_call_events(self, project: str, trace_id: str, span_id: str) -> tuple[Event, ...]:
+        with self._open_connection() as connection:
+            rows: list[EventRow] = connection.execute(
+                SELECT_SPAN_EVENTS, (project, trace_id, span_id)
+            ).fetchall()
+        return tuple(_read_event(row) for row in rows)
 
     def list_roots(
         self, project: str, root_set: RootSet, cursor: str | None, limit: int
