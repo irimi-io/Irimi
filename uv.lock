@@ -154,6 +154,12 @@ source = { editable = "packages/sdk" }
 name = "irimi-cli"
 version = "0.0.0"
 source = { editable = "packages/cli" }
+dependencies = [
+    { name = "irimi-store" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "irimi-store", editable = "packages/store" }]
 
 [[package]]
 name = "irimi-store"
