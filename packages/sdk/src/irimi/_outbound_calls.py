@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+from irimi._bodies import CopiedBody, copy_body, describe_body
+from irimi._credential_headers import replace_credential_values
+from irimi._errors import describe_error
+from irimi._recording import Payload
+from irimi._wire import JsonValue, field_names, write_flags
+
+Headers = tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class OutboundCall:
+    method: str
+    url: str
+    headers: Headers
+    body: bytes | None
+    has_streamed_body: bool
+
+
+@dataclass(frozen=True)
+class OutboundResponse:
+    status: int
+    headers: Headers
+
+
+@dataclass(frozen=True)
+class CallOutcome:
+    response: OutboundResponse | None
+    body: CopiedBody | None
+    is_body_complete: bool
+    error: BaseException | None
+
+
+def name_http_call(call: OutboundCall) -> str:
+    address = urlsplit(call.url)
+    return f"{call.method} {address.hostname or ''}{address.path or '/'}"
+
+
+def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
+    request: dict[str, JsonValue] = {
+        "method": call.method,
+        "url": call.url,
+        "headers": replace_credential_values(call.headers),
+    }
+    size = len(call.url) + _measure_header_values(call.headers)
+    if call.body:
+        body = copy_body(call.body)
+        request["body"] = _describe_body(body, call.headers)
+        size += len(body.content)
+    fields: dict[str, JsonValue] = {field_names.REQUEST: request}
+    if not is_attached:
+        fields[field_names.FLAGS] = write_flags("unattached")
+    return Payload(fields, size)
+
+
+def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload:
+    status = (
+        describe_error(outcome.error)
+        if outcome.error is not None
+        else Payload({field_names.STATUS: "ok"}, 0)
+    )
+    fields: dict[str, JsonValue] = {**status.fields, field_names.ANSWERED: "live"}
+    size = status.approximate_size
+    if outcome.response is not None:
+        response = _describe_response(outcome.response, outcome.body)
+        fields[field_names.RESPONSE] = dict(response.fields)
+        size += response.approximate_size
+    return Payload(fields, size)
+
+
+def _describe_response(response: OutboundResponse, body: CopiedBody | None) -> Payload:
+    described: dict[str, JsonValue] = {
+        "status": response.status,
+        "headers": replace_credential_values(response.headers),
+    }
+    size = _measure_header_values(response.headers)
+    if body is not None and body.content:
+        described["body"] = _describe_body(body, response.headers)
+        size += len(body.content)
+    return Payload(described, size)
+
+
+def _describe_body(body: CopiedBody, headers: Headers) -> dict[str, JsonValue]:
+    return describe_body(
+        body, _find_header(headers, "content-type"), _find_header(headers, "content-encoding")
+    )
+
+
+def _find_header(headers: Sequence[tuple[str, str]], lower_case_name: str) -> str | None:
+    return next((value for name, value in headers if name.lower() == lower_case_name), None)
+
+
+def _measure_header_values(headers: Sequence[tuple[str, str]]) -> int:
+    return sum(len(value) for _, value in headers)

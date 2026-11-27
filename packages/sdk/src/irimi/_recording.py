@@ -57,6 +57,15 @@ class Recorder:
         return self._current_call.get()
 
     def begin_call(self, kind: str, name: str, payload: Payload) -> ActiveCall:
+        call = self.begin_detached_call(kind, name, payload)
+        self._current_call.set(call)
+        return call
+
+    def end_call(self, call: ActiveCall, payload: Payload) -> None:
+        self._current_call.set(call.parent)
+        self._write_end(call, payload, is_run_end=call.parent is None and call.run.is_workflow)
+
+    def begin_detached_call(self, kind: str, name: str, payload: Payload) -> ActiveCall:
         parent = self._current_call.get()
         run = parent.run if parent else Run(_new_trace_id(), is_workflow=kind == "workflow")
         call = ActiveCall(run=run, span_id=_new_span_id(), parent=parent)
@@ -75,14 +84,15 @@ class Recorder:
             ),
             payload.approximate_size,
         )
-        self._current_call.set(call)
         return call
 
-    def end_call(self, call: ActiveCall, payload: Payload) -> None:
-        self._current_call.set(call.parent)
+    def end_detached_call(self, call: ActiveCall, payload: Payload) -> None:
+        self._write_end(call, payload, is_run_end=False)
+
+    def _write_end(self, call: ActiveCall, payload: Payload, is_run_end: bool) -> None:
         events_produced = call.run.count_end()
         fields = payload.fields
-        if call.parent is None and call.run.is_workflow:
+        if is_run_end:
             fields = {**fields, field_names.EVENTS_PRODUCED: events_produced}
         self._enqueue(
             EndEvent(

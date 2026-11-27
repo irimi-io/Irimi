@@ -13,7 +13,9 @@ from irimi._delivery import Destination, StoreClient
 from irimi._drops import DropTally
 from irimi._exporter import Exporter
 from irimi._git import find_commit
+from irimi._interception import Interception
 from irimi._labeled_calls import RunSettings
+from irimi._patching import patch_installed_libraries
 from irimi._recording import Recorder
 
 logger = logging.getLogger("irimi")
@@ -55,6 +57,7 @@ class Sdk:
         self._lock = threading.Lock()
         self._exporter: Exporter | None = None
         self._first_arguments: InitArguments | None = None
+        self._first_result = NORMAL_RUN
         self._workflow_import_paths: dict[str, str] = {}
         self._drops = DropTally()
 
@@ -68,10 +71,12 @@ class Sdk:
             if self._first_arguments is not None:
                 if arguments != self._first_arguments:
                     logger.warning("irimi.init was called again with different arguments; ignored")
-                return NORMAL_RUN
+                return self._first_result
             self._first_arguments = arguments
-            self._start_recording(arguments, environment_variables, working_directory)
-            return NORMAL_RUN
+            self._first_result = self._start_recording(
+                arguments, environment_variables, working_directory
+            )
+            return self._first_result
 
     def flush(self, timeout: float | None) -> bool:
         is_drained = self._exporter is None or self._exporter.flush(timeout)
@@ -93,11 +98,11 @@ class Sdk:
         arguments: InitArguments,
         environment_variables: Mapping[str, str],
         working_directory: Path,
-    ) -> None:
+    ) -> InitResult:
         store_url = arguments.store_url or environment_variables.get("IRIMI_STORE_URL")
         if not store_url:
             logger.warning("irimi has no store URL, so nothing is recorded; set IRIMI_STORE_URL")
-            return
+            return NORMAL_RUN
         destination = Destination(
             store_url=store_url,
             api_key=arguments.api_key or environment_variables.get("IRIMI_API_KEY"),
@@ -108,7 +113,10 @@ class Sdk:
             commit=find_commit(working_directory),
         )
         self._exporter = Exporter(StoreClient(destination).send_batch, self._drops)
-        self.recording = Recording(Recorder(self._exporter.enqueue, time.time_ns), settings)
+        recorder = Recorder(self._exporter.enqueue, time.time_ns)
+        self.recording = Recording(recorder, settings)
+        report = patch_installed_libraries(Interception(recorder, self.report_failure))
+        return InitResult(mode="normal", patched=report.patched, unpatched=report.unpatched)
 
 
 SDK = Sdk()
