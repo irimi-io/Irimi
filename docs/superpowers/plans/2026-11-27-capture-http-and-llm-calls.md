@@ -106,37 +106,53 @@ REQUEST = "request"
 RESPONSE = "response"
 ANSWERED = "answered"
 Flag = Literal[
-    "not_replayable", "unserialisable_output", "unattached",
-    "request_body_truncated", "response_body_truncated",
-    "request_body_not_recorded", "response_body_incomplete",
+    "not_replayable",
+    "unserialisable_output",
+    "unattached",
+    "request_body_truncated",
+    "response_body_truncated",
+    "request_body_not_recorded",
+    "response_body_incomplete",
 ]
 
+
 # irimi._wire.markers, exported from irimi._wire
-def mark_redacted(reason: str) -> dict[str, JsonValue]: ...   # {"$irimi": "redacted", "reason": reason}
+def mark_redacted(
+    reason: str,
+) -> dict[str, JsonValue]: ...  # {"$irimi": "redacted", "reason": reason}
+
 
 # irimi._errors
-def describe_error(error: BaseException) -> Payload: ...       # moved unchanged
+def describe_error(error: BaseException) -> Payload: ...  # moved unchanged
+
 
 # irimi._recording.Recorder
 def begin_detached_call(self, kind: str, name: str, payload: Payload) -> ActiveCall: ...
 def end_detached_call(self, call: ActiveCall, payload: Payload) -> None: ...
 
+
 # irimi._credential_headers
-CREDENTIAL_HEADER_NAMES: frozenset[str]                        # lower case, the 17 names in the spec
+CREDENTIAL_HEADER_NAMES: frozenset[str]  # lower case, the 17 names in the spec
+
+
 def replace_credential_values(headers: Sequence[tuple[str, str]]) -> dict[str, JsonValue]: ...
+
 
 # irimi._bodies
 BODY_LIMIT = 4 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class CopiedBody:
     content: bytes
     is_truncated: bool
 
+
 def copy_body(content: bytes) -> CopiedBody: ...
 def describe_body(
     body: CopiedBody, content_type: str | None, content_encoding: str | None
 ) -> dict[str, JsonValue]: ...
+
 
 # irimi._outbound_calls
 @dataclass(frozen=True)
@@ -147,10 +163,12 @@ class OutboundCall:
     body: bytes | None
     has_streamed_body: bool
 
+
 @dataclass(frozen=True)
 class OutboundResponse:
     status: int
     headers: tuple[tuple[str, str], ...]
+
 
 @dataclass(frozen=True)
 class CallOutcome:
@@ -159,9 +177,11 @@ class CallOutcome:
     is_body_complete: bool
     error: BaseException | None
 
+
 def name_http_call(call: OutboundCall) -> str: ...
 def describe_request(call: OutboundCall, is_attached: bool) -> Payload: ...
 def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload: ...
+
 
 # irimi._interception
 @dataclass(frozen=True)
@@ -169,13 +189,16 @@ class OpenCall:
     call: ActiveCall
     is_attached: bool
 
+
 class Interception:
     def __init__(self, recorder: Recorder, report_failure: Callable[[str], None]) -> None: ...
     def begin(self, call: OutboundCall) -> OpenCall | None: ...
     def end(self, open_call: OpenCall | None, outcome: CallOutcome) -> None: ...
 
+
 # irimi._httpx_patch
 def patch_httpx(library: ModuleType, interception: Interception) -> bool: ...
+
 
 # irimi._patching
 @dataclass(frozen=True)
@@ -183,20 +206,26 @@ class PatchReport:
     patched: tuple[str, ...]
     unpatched: tuple[str, ...]
 
+
 def patch_installed_libraries(interception: Interception) -> PatchReport: ...
+
 
 # packages/sdk/tests/conftest.py
 @dataclass
 class UpstreamAnswer:
     status: int = 200
-    headers: list[tuple[str, str]] = field(default_factory=lambda: [("Content-Type", "application/json")])
+    headers: list[tuple[str, str]] = field(
+        default_factory=lambda: [("Content-Type", "application/json")]
+    )
     chunks: list[bytes] = field(default_factory=lambda: [b'{"ok": true}'])
     breaks_off: bool = False
 
-class FakeUpstream:                  # fixture name: upstream
-    url: str                         # http://127.0.0.1:<port>
-    answers: dict[str, UpstreamAnswer]   # by path; a path not listed gets UpstreamAnswer()
-    requests: list[tuple[str, str, bytes]]   # method, path, body
+
+class FakeUpstream:  # fixture name: upstream
+    url: str  # http://127.0.0.1:<port>
+    answers: dict[str, UpstreamAnswer]  # by path; a path not listed gets UpstreamAnswer()
+    requests: list[tuple[str, str, bytes]]  # method, path, body
+
 
 # fixture http_library: parametrised over "httpx" and "httpx2", yields the imported module
 ```
@@ -332,7 +361,7 @@ Expected: all pass, including every test in `test_recording.py` unchanged.
 ```python
 # irimi._bodies
 class BodyCopy:
-    def add(self, chunk: bytes) -> None: ...      # keeps at most BODY_LIMIT bytes
+    def add(self, chunk: bytes) -> None: ...  # keeps at most BODY_LIMIT bytes
     def take(self) -> CopiedBody: ...
 ```
 
@@ -540,7 +569,10 @@ In `packages/cli/tests/test_read_a_run.py`, the `APP` workflow gains one outboun
 
 ```python
 import httpx2
+
 ...
+
+
 @irimi.workflow
 def handle_ticket(ticket):
     httpx2.get(os.environ["IRIMI_STORE_URL"] + "/api/v1/runs")
@@ -551,14 +583,15 @@ def handle_ticket(ticket):
 and the test asserts:
 
 ```python
-    children = root["children"]
-    assert [(child["kind"], child["name"]) for child in children] == [
-        ("http", "GET 127.0.0.1/api/v1/runs"), ("function", "record_refund"),
-    ]
-    call_url = f"{local_store_url}/api/v1/runs/{run_id}/calls/{children[0]['span_id']}"
-    with urllib.request.urlopen(call_url) as answer:
-        call = json.loads(answer.read())
-    # assert the call document holds a response status of 200 and a request url ending "/api/v1/runs"
+children = root["children"]
+assert [(child["kind"], child["name"]) for child in children] == [
+    ("http", "GET 127.0.0.1/api/v1/runs"),
+    ("function", "record_refund"),
+]
+call_url = f"{local_store_url}/api/v1/runs/{run_id}/calls/{children[0]['span_id']}"
+with urllib.request.urlopen(call_url) as answer:
+    call = json.loads(answer.read())
+# assert the call document holds a response status of 200 and a request url ending "/api/v1/runs"
 ```
 
 The CLI has no command for one call, so the test reads the store's call read (`CALL_PATH` in `irimi_store.reader_documents`) directly, as it already reads the list. Look at the document `read_call` returns before writing the last assertion.
@@ -595,13 +628,15 @@ Expected: the run lists two `http` children named `POST 127.0.0.1/v1/messages`; 
 
 ```python
 # irimi._llm_providers
-def recognise_llm_call(method: str, host: str, path: str) -> str | None: ...   # the name, or None
+def recognise_llm_call(method: str, host: str, path: str) -> str | None: ...  # the name, or None
+
 
 # irimi._outbound_calls
 @dataclass(frozen=True)
 class CallIdentity:
     kind: Literal["http", "llm"]
     name: str
+
 
 def identify_call(call: OutboundCall) -> CallIdentity: ...
 ```
@@ -628,23 +663,46 @@ The provider is never contacted: the client sends plain HTTP to the provider's h
         ("http://API.Anthropic.com/v1/messages?beta=true", "llm", "anthropic messages.create"),
         ("http://api.openai.com/v1/chat/completions", "llm", "openai chat.completions.create"),
         ("http://api.openai.com/v1/responses", "llm", "openai responses.create"),
-        ("http://openrouter.ai/api/v1/chat/completions", "llm", "openrouter chat.completions.create"),
-        ("http://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent",
-         "llm", "gemini models.generate_content"),
-        ("http://generativelanguage.googleapis.com/v1/models/gemini-3-pro:streamGenerateContent?alt=sse",
-         "llm", "gemini models.generate_content"),
-        ("http://api.anthropic.com/v1/messages/count_tokens", "http",
-         "POST api.anthropic.com/v1/messages/count_tokens"),
+        (
+            "http://openrouter.ai/api/v1/chat/completions",
+            "llm",
+            "openrouter chat.completions.create",
+        ),
+        (
+            "http://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:generateContent",
+            "llm",
+            "gemini models.generate_content",
+        ),
+        (
+            "http://generativelanguage.googleapis.com/v1/models/gemini-3-pro:streamGenerateContent?alt=sse",
+            "llm",
+            "gemini models.generate_content",
+        ),
+        (
+            "http://api.anthropic.com/v1/messages/count_tokens",
+            "http",
+            "POST api.anthropic.com/v1/messages/count_tokens",
+        ),
         ("http://api.openai.com/v1/embeddings", "http", "POST api.openai.com/v1/embeddings"),
-        ("http://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:countTokens", "http",
-         "POST generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:countTokens"),
-        ("http://my-gateway.internal/v1/chat/completions", "http",
-         "POST my-gateway.internal/v1/chat/completions"),
+        (
+            "http://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:countTokens",
+            "http",
+            "POST generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:countTokens",
+        ),
+        (
+            "http://my-gateway.internal/v1/chat/completions",
+            "http",
+            "POST my-gateway.internal/v1/chat/completions",
+        ),
     ],
 )
 def test_a_call_is_named_by_its_provider_and_operation(
-    recorded_events: TakeEvents, upstream: FakeUpstream, http_library: Any,
-    url: str, kind: str, name: str,
+    recorded_events: TakeEvents,
+    upstream: FakeUpstream,
+    http_library: Any,
+    url: str,
+    kind: str,
+    name: str,
 ) -> None:
     @irimi.workflow
     def ask() -> int:
