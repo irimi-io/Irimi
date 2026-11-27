@@ -1,10 +1,7 @@
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
-
-import pytest
-from irimi._wire import EndEvent, Event, StartEvent
+from typing import Any
 
 APP = """
 import irimi
@@ -24,46 +21,31 @@ handle_ticket({"id": "T-1042", "text": "Charged twice"})
 """
 
 
-class MemoryStorageEngine:
-    def __init__(self) -> None:
-        self.events: list[Event] = []
-
-    def add_events(self, project: str, events: Sequence[Event]) -> None:
-        self.events.extend(events)
-
-    def read_run_events(self, project: str, trace_id: str) -> tuple[Event, ...]:
-        return tuple(event for event in self.events if event.trace_id == trace_id)
-
-
-@pytest.fixture
-def storage() -> MemoryStorageEngine:
-    return MemoryStorageEngine()
-
-
-def test_a_run_recorded_in_an_app_arrives_in_the_store(
-    store_url: str, storage: MemoryStorageEngine
-) -> None:
+def test_a_run_recorded_in_an_app_arrives_in_the_store(store: Any) -> None:
     subprocess.run(
         [sys.executable, "-c", APP],
-        env={**os.environ, "IRIMI_STORE_URL": store_url, "IRIMI_ENVIRONMENT": "production"},
+        env={**os.environ, "IRIMI_STORE_URL": store.url, "IRIMI_ENVIRONMENT": "production"},
         timeout=60,
         check=True,
     )
 
-    run_start, step_start, step_end, run_end = storage.events
+    (run,) = store.get("/api/v1/runs")[1]["runs"]
+    run_start, step_start, step_end, run_end = store.get(f"/v1/runs/{run['id']}/events")[1][
+        "events"
+    ]
 
-    assert isinstance(run_start, StartEvent)
-    assert isinstance(step_start, StartEvent)
-    assert isinstance(step_end, EndEvent)
-    assert isinstance(run_end, EndEvent)
-    assert (run_start.kind, run_start.name) == ("workflow", "handle_ticket")
-    assert run_start.fields["environment"] == "production"
-    assert run_start.fields["input"] == {
-        "args": [{"id": "T-1042", "text": "Charged twice"}],
-        "kwargs": {},
-    }
-    assert (step_start.kind, step_start.name) == ("function", "record_refund")
-    assert (step_start.parent_span_id, step_start.fields["write"]) == (run_start.span_id, True)
-    assert step_end.fields["output"] == {"row_id": 9917}
-    assert (run_end.fields["output"], run_end.fields["events_produced"]) == ("Refund issued", 4)
-    assert storage.read_run_events("default", run_start.trace_id) == tuple(storage.events)
+    assert (run["name"], run["environment"], run["conditions"]) == (
+        "handle_ticket",
+        "production",
+        [],
+    )
+    assert (run_start["type"], run_start["kind"], run_start["name"]) == (
+        "start",
+        "workflow",
+        "handle_ticket",
+    )
+    assert run_start["input"] == {"args": [{"id": "T-1042", "text": "Charged twice"}], "kwargs": {}}
+    assert (step_start["kind"], step_start["name"]) == ("function", "record_refund")
+    assert (step_start["parent_span_id"], step_start["write"]) == (run_start["span_id"], True)
+    assert (step_end["type"], step_end["output"]) == ("end", {"row_id": 9917})
+    assert (run_end["output"], run_end["events_produced"]) == ("Refund issued", 4)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import string
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -7,8 +8,11 @@ from irimi._wire.json_value import JsonValue
 
 WIRE_VERSION = "v1"
 EVENTS_PATH = f"/{WIRE_VERSION}/events"
+RUN_EVENTS_PATH = f"/{WIRE_VERSION}/runs/{{trace_id}}/events"
 EVENT_FIELD_NAMES = frozenset({"id", "type", "trace_id", "span_id", "time_unix_nano"})
 START_FIELD_NAMES = frozenset({"parent_span_id", "kind", "name", "seq"})
+ID_CHARACTERS = frozenset(string.ascii_letters + string.digits + "-_.~")
+LARGEST_ID_LENGTH = 128
 LARGEST_WHOLE_NUMBER = 2**63 - 1
 DIGITS_IN_LARGEST_WHOLE_NUMBER = len(str(LARGEST_WHOLE_NUMBER))
 
@@ -114,10 +118,10 @@ def parse_event(document: JsonValue, place: str = "event") -> Event:
         return _parse_start_event(document, place)
     event_class = EndEvent if event_type == "end" else Event
     return event_class(
-        id=_read_string(document, "id", place),
+        id=_read_id(document, "id", place),
         type=event_type,
-        trace_id=_read_string(document, "trace_id", place),
-        span_id=_read_string(document, "span_id", place),
+        trace_id=_read_id(document, "trace_id", place),
+        span_id=_read_id(document, "span_id", place),
         time_unix_nano=_read_time(document, place),
         fields=_without(document, EVENT_FIELD_NAMES),
     )
@@ -125,10 +129,10 @@ def parse_event(document: JsonValue, place: str = "event") -> Event:
 
 def _parse_start_event(document: dict[str, JsonValue], place: str) -> StartEvent:
     return StartEvent(
-        id=_read_string(document, "id", place),
+        id=_read_id(document, "id", place),
         type="start",
-        trace_id=_read_string(document, "trace_id", place),
-        span_id=_read_string(document, "span_id", place),
+        trace_id=_read_id(document, "trace_id", place),
+        span_id=_read_id(document, "span_id", place),
         time_unix_nano=_read_time(document, place),
         parent_span_id=_read_parent_span_id(document, place),
         kind=_read_string(document, "kind", place),
@@ -161,6 +165,19 @@ def _read_string(document: dict[str, JsonValue], name: str, place: str) -> str:
     return value
 
 
+def _read_id(document: dict[str, JsonValue], name: str, place: str) -> str:
+    value = document.get(name)
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= LARGEST_ID_LENGTH
+        or not ID_CHARACTERS.issuperset(value)
+    ):
+        raise WireFormatError(
+            f"{place}.{name}: expected 1 to {LARGEST_ID_LENGTH} of letters, digits, - _ . ~"
+        )
+    return value
+
+
 def _read_time(document: dict[str, JsonValue], place: str) -> int:
     value = document.get("time_unix_nano")
     if not isinstance(value, str) or not (value.isascii() and value.isdigit()):
@@ -175,7 +192,7 @@ def _read_parent_span_id(document: dict[str, JsonValue], place: str) -> str | No
         raise WireFormatError(f"{place}.parent_span_id: expected a string or null")
     if document["parent_span_id"] is None:
         return None
-    return _read_string(document, "parent_span_id", place)
+    return _read_id(document, "parent_span_id", place)
 
 
 def _read_seq(document: dict[str, JsonValue], place: str) -> int:

@@ -1,5 +1,6 @@
 from irimi._wire.events import (
     EVENTS_PATH,
+    RUN_EVENTS_PATH,
     WIRE_VERSION,
     Batch,
     EndEvent,
@@ -26,6 +27,7 @@ from irimi._wire.markers import (
 
 __all__ = [
     "EVENTS_PATH",
+    "RUN_EVENTS_PATH",
     "WIRE_VERSION",
     "Batch",
     "EndEvent",

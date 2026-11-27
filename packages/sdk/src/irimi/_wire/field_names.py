@@ -16,6 +16,7 @@ ENVIRONMENT = "environment"
 DEPLOYMENT = "deployment"
 STARTED_BY = "started_by"
 EVENTS_PRODUCED = "events_produced"
+NEXT_CURSOR = "next_cursor"
 
 Flag = Literal["not_replayable", "unserialisable_output", "unattached"]
 
