@@ -36,21 +36,31 @@ class _ResponseRecording:
         self._open_call = open_call
         self._response = response
         self._body = BodyCopy()
-        self._is_ended = False
+        self._is_recording = True
 
     def add(self, chunk: bytes) -> None:
-        self._body.add(chunk)
+        if not self._is_recording:
+            return
+        try:
+            self._body.add(chunk)
+        except Exception:
+            self._is_recording = False
+            self._interception.report_failure("copy an outbound response body")
 
     def end(self, is_body_complete: bool, error: BaseException | None) -> None:
-        if self._is_ended:
+        if not self._is_recording:
             return
-        self._is_ended = True
-        outcome = CallOutcome(
-            response=self._response,
-            body=self._body.take(),
-            is_body_complete=is_body_complete,
-            error=error,
-        )
+        self._is_recording = False
+        try:
+            outcome = CallOutcome(
+                response=self._response,
+                body=self._body.take(),
+                is_body_complete=is_body_complete,
+                error=error,
+            )
+        except Exception:
+            self._interception.report_failure("record the end of an outbound call")
+            return
         self._interception.end(self._open_call, outcome)
 
 
@@ -181,8 +191,10 @@ def _iterate_sync_stream(stream: Any) -> Iterator[bytes]:
 
 
 def _close_sync_stream(stream: Any) -> None:
-    stream.recording.end(is_body_complete=False, error=None)
-    stream.inner_stream.close()
+    try:
+        stream.recording.end(is_body_complete=False, error=None)
+    finally:
+        stream.inner_stream.close()
 
 
 async def _iterate_async_stream(stream: Any) -> AsyncIterator[bytes]:
@@ -199,8 +211,10 @@ async def _iterate_async_stream(stream: Any) -> AsyncIterator[bytes]:
 
 
 async def _close_async_stream(stream: Any) -> None:
-    stream.recording.end(is_body_complete=False, error=None)
-    await stream.inner_stream.aclose()
+    try:
+        stream.recording.end(is_body_complete=False, error=None)
+    finally:
+        await stream.inner_stream.aclose()
 
 
 def _find_attribute(root: object, path: str) -> object:

@@ -134,9 +134,9 @@ class FakeUpstream:
                 for chunk in answer.chunks:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                     self.wfile.flush()
-                    if answer.breaks_off:
-                        self.close_connection = True
-                        return
+                if answer.breaks_off:
+                    self.close_connection = True
+                    return
                 self.wfile.write(b"0\r\n\r\n")
 
             def log_message(self, format: str, *args: Any) -> None:

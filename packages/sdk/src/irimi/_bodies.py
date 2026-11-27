@@ -55,7 +55,4 @@ def _encode(body: CopiedBody) -> dict[str, JsonValue]:
 
 
 def _decode_text(body: CopiedBody) -> str:
-    if not body.is_truncated:
-        return body.content.decode("utf-8")
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    return decoder.decode(body.content, final=False)
+    return codecs.getincrementaldecoder("utf-8")().decode(body.content, final=not body.is_truncated)

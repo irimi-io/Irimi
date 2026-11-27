@@ -180,6 +180,28 @@ def test_a_response_closed_early_is_recorded_as_far_as_it_was_read(
     assert 0 < len(call_end["response"]["body"]["data"]) < 3 * HALF_A_MEGABYTE
 
 
+def test_an_async_response_closed_early_is_recorded_as_far_as_it_was_read(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    upstream.set_answer("/archive", chunks=[b"x" * HALF_A_MEGABYTE] * 3)
+
+    @irimi.workflow
+    async def peek_at_archive() -> None:
+        async with (
+            http_library.AsyncClient() as client,
+            client.stream("GET", f"{upstream.url}/archive") as answer,
+        ):
+            await anext(answer.aiter_raw())
+
+    asyncio.run(peek_at_archive())
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["status"] == "ok"
+    assert call_end["flags"] == ["response_body_incomplete"]
+    assert 0 < len(call_end["response"]["body"]["data"]) < 3 * HALF_A_MEGABYTE
+
+
 def test_a_response_that_breaks_off_is_recorded_with_its_error(
     recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:
@@ -192,6 +214,27 @@ def test_a_response_that_breaks_off_is_recorded_with_its_error(
 
     with pytest.raises(http_library.RemoteProtocolError):
         read_report()
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["status"] == "error"
+    assert call_end["error"]["type"].endswith("RemoteProtocolError")
+    assert call_end["response"]["status"] == 200
+    assert call_end["flags"] == ["response_body_incomplete"]
+
+
+def test_an_async_response_that_breaks_off_is_recorded_with_its_error(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    upstream.set_answer("/report", chunks=[b"x" * 1024], breaks_off=True)
+
+    @irimi.workflow
+    async def read_report() -> None:
+        async with http_library.AsyncClient() as client:
+            await client.get(f"{upstream.url}/report")
+
+    with pytest.raises(http_library.RemoteProtocolError):
+        asyncio.run(read_report())
 
     _, call_end = take_call(recorded_events)
 
