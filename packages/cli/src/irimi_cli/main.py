@@ -14,7 +14,7 @@ from irimi_store.reader_documents import (
     parse_run,
     parse_run_page,
 )
-from irimi_store.server import LOCAL_HOST, serve_local_store
+from irimi_store.server import LocalStoreError, serve_local_store
 
 from irimi_cli.printing import print_run_list, print_run_tree
 from irimi_cli.store_client import StoreError, read_from_store
@@ -30,19 +30,27 @@ STORE_ERROR = 1
 
 def main(arguments: Sequence[str] | None = None) -> int:
     options = _build_parser().parse_args(arguments)
+    try:
+        return _run_command(options)
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+    except (StoreError, LocalStoreError) as error:
+        print(error, file=sys.stderr)
+        return STORE_ERROR
+
+
+def _run_command(options: argparse.Namespace) -> int:
     if options.command == "store":
-        return _start_store(options.database, options.port)
+        serve_local_store(options.database, options.port, _announce_store)
+        return 0
     store_url = options.store_url or os.environ.get(STORE_URL_VARIABLE)
     if not store_url:
         print(f"no store address: pass --store-url or set {STORE_URL_VARIABLE}", file=sys.stderr)
         return USAGE_ERROR
-    try:
-        if options.run_id is None:
-            return _list_runs(store_url, options.limit, options.cursor, options.json)
-        return _show_run(store_url, options.run_id, options.json)
-    except StoreError as error:
-        print(error, file=sys.stderr)
-        return STORE_ERROR
+    if options.run_id is None:
+        return _list_runs(store_url, options.limit, options.cursor, options.json)
+    return _show_run(store_url, options.run_id, options.json)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -60,22 +68,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _start_store(database_path: Path, port: int) -> int:
-    store_url = f"http://{LOCAL_HOST}:{port}"
-    print(store_url)
-    print(f"set {STORE_URL_VARIABLE}={store_url} to record to this store and read from it")
-    sys.stdout.flush()
-    serve_local_store(database_path, port)
-    return 0
+def _announce_store(store_url: str) -> None:
+    how_to_use_it = f"set {STORE_URL_VARIABLE}={store_url} to record to this store and read from it"
+    _write_text(f"{store_url}\n{how_to_use_it}")
 
 
 def _list_runs(store_url: str, limit: str | None, cursor: str | None, as_json: bool) -> int:
-    query = {name: value for name, value in (("limit", limit), ("cursor", cursor)) if value}
+    asked = (("limit", limit), ("cursor", cursor))
+    query = {name: value for name, value in asked if value is not None}
     document = read_from_store(store_url, RUNS_PATH, query)
     if as_json:
         return _write_document(document)
-    print(print_run_list(_parse_answer(store_url, document, parse_run_page)))
-    return 0
+    return _write_text(_print_answer(store_url, document, parse_run_page, print_run_list))
 
 
 def _show_run(store_url: str, run_id: str, as_json: bool) -> int:
@@ -83,7 +87,26 @@ def _show_run(store_url: str, run_id: str, as_json: bool) -> int:
     document = read_from_store(store_url, path, {})
     if as_json:
         return _write_document(document)
-    print(print_run_tree(_parse_answer(store_url, document, parse_run)))
+    return _write_text(_print_answer(store_url, document, parse_run, print_run_tree))
+
+
+def _print_answer(
+    store_url: str,
+    document: bytes,
+    parse: Callable[[Any], Answer],
+    print_answer: Callable[[Answer], str],
+) -> str:
+    try:
+        return print_answer(parse(json.loads(document)))
+    except RecursionError as error:
+        raise StoreError("the answer is nested too deeply to print; use --json") from error
+    except (ReaderDocumentError, ValueError, OverflowError) as error:
+        raise StoreError(f"{store_url} did not answer as a store does: {error}") from error
+
+
+def _write_text(text: str) -> int:
+    print(text)
+    sys.stdout.flush()
     return 0
 
 
@@ -91,10 +114,3 @@ def _write_document(document: bytes) -> int:
     sys.stdout.buffer.write(document)
     sys.stdout.buffer.flush()
     return 0
-
-
-def _parse_answer(store_url: str, document: bytes, parse: Callable[[Any], Answer]) -> Answer:
-    try:
-        return parse(json.loads(document))
-    except (ReaderDocumentError, json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise StoreError(f"{store_url} did not answer as a store does: {error}") from error

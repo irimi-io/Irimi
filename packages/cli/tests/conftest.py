@@ -1,5 +1,4 @@
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -12,13 +11,6 @@ import pytest
 
 IRIMI = Path(sys.executable).parent / "irimi"
 SECONDS_TO_WAIT_FOR_THE_STORE = 30.0
-
-
-def find_free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port: int = listener.getsockname()[1]
-    return port
 
 
 def wait_until_the_store_answers(store_url: str) -> None:
@@ -37,18 +29,19 @@ def wait_until_the_store_answers(store_url: str) -> None:
 @pytest.fixture
 def local_store_url(tmp_path: Path) -> Iterator[str]:
     store = subprocess.Popen(
-        [IRIMI, "store", "--port", str(find_free_port()), "--database", tmp_path / "store.db"],
+        [IRIMI, "store", "--port", "0", "--database", tmp_path / "store.db"],
         stdout=subprocess.PIPE,
         text=True,
     )
+    assert store.stdout is not None
     try:
-        assert store.stdout is not None
         store_url = store.stdout.readline().strip()
         wait_until_the_store_answers(store_url)
         yield store_url
     finally:
         store.terminate()
         store.wait(timeout=10)
+        store.stdout.close()
 
 
 @pytest.fixture

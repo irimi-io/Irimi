@@ -15,6 +15,7 @@ from irimi_store.reader_documents import (
     UNATTACHED_CALLS_PATH,
     RunSummary,
     write_call,
+    write_refusal,
     write_run,
     write_run_page,
     write_unattached_call_page,
@@ -87,10 +88,11 @@ def _read_every_run_event(storage: StorageEngine, trace_id: str) -> tuple[Event,
 async def refuse_unknown_reader_api_path(request: Request) -> JSONResponse:
     version = request.path_params["version"]
     if version in ACCEPTED_READER_API_VERSIONS:
-        return JSONResponse({"error": f"nothing is served at {request.url.path}"}, status_code=404)
+        refusal = write_refusal(f"nothing is served at {request.url.path}")
+        return JSONResponse(refusal, status_code=404)
     return JSONResponse(
         {
-            "error": f"unknown reader API version: {version}",
+            **write_refusal(f"unknown reader API version: {version}"),
             "accepted_versions": list(ACCEPTED_READER_API_VERSIONS),
         },
         status_code=404,

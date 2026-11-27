@@ -19,6 +19,7 @@ from starlette.routing import Route
 
 from irimi_store.page_requests import InvalidPageRequestError, read_page_request
 from irimi_store.pages import InvalidCursorError
+from irimi_store.reader_documents import write_refusal
 from irimi_store.reader_routes import create_reader_routes
 from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, StorageEngine
 
@@ -68,11 +69,11 @@ def create_app(storage: StorageEngine) -> Starlette:
 
 
 async def refuse_request(request: Request, error: Exception) -> JSONResponse:
-    return JSONResponse({"error": str(error)}, status_code=400)
+    return JSONResponse(write_refusal(str(error)), status_code=400)
 
 
 async def answer_not_held(request: Request, error: Exception) -> JSONResponse:
-    return JSONResponse({"error": str(error)}, status_code=404)
+    return JSONResponse(write_refusal(str(error)), status_code=404)
 
 
 async def refuse_unknown_version(request: Request) -> JSONResponse:
