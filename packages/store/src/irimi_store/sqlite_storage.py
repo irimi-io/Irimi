@@ -5,7 +5,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from irimi._wire import EndEvent, Event, JsonValue, StartEvent, parse_event
-from irimi._wire.events import LARGEST_WHOLE_NUMBER
+from irimi._wire.events import DIGITS_IN_LARGEST_WHOLE_NUMBER, LARGEST_WHOLE_NUMBER
 
 from irimi_store.pages import InvalidCursorError, Page
 from irimi_store.sqlite_schema import is_unattached, migrate
@@ -30,6 +30,12 @@ SELECT {EVENT_COLUMNS}, arrival, (
 FROM events
 WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NULL
     AND (time_unix_nano, arrival) < (?, ?)
+    AND NOT EXISTS (
+        SELECT 1 FROM events earlier
+        WHERE earlier.project = events.project AND earlier.trace_id = events.trace_id
+            AND earlier.span_id = events.span_id AND earlier.type = 'start'
+            AND earlier.arrival < events.arrival
+    )
 ORDER BY time_unix_nano DESC, arrival DESC LIMIT ?
 """
 SELECT_SPAN_EVENTS = f"""
@@ -56,9 +62,7 @@ class SqliteStorageEngine:
     def __init__(self, database_path: Path, read_clock: Callable[[], int]) -> None:
         self._database_path = database_path
         self._read_clock = read_clock
-        with self._open_connection() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
-            migrate(connection)
+        migrate(database_path)
 
     def add_events(self, project: str, events: Sequence[Event]) -> None:
         created_at = self._read_clock()
@@ -123,24 +127,23 @@ class SqliteStorageEngine:
 
 
 def _read_arrival_cursor(cursor: str | None) -> int:
-    if cursor is None:
-        return 0
-    if not _is_whole_number(cursor):
-        raise InvalidCursorError("cursor: not one this store issued")
-    return int(cursor)
+    return 0 if cursor is None else _read_cursor_number(cursor)
 
 
 def _read_root_cursor(cursor: str | None) -> tuple[int, int]:
     if cursor is None:
         return NEWEST_ROOT_POSITION
-    time_unix_nano, separator, arrival = cursor.partition("-")
-    if not (separator and _is_whole_number(time_unix_nano) and _is_whole_number(arrival)):
+    time_unix_nano, _, arrival = cursor.partition("-")
+    return _read_cursor_number(time_unix_nano), _read_cursor_number(arrival)
+
+
+def _read_cursor_number(text: str) -> int:
+    is_whole_number = text.isascii() and text.isdigit()
+    if not is_whole_number or len(text) > DIGITS_IN_LARGEST_WHOLE_NUMBER:
         raise InvalidCursorError("cursor: not one this store issued")
-    return int(time_unix_nano), int(arrival)
-
-
-def _is_whole_number(text: str) -> bool:
-    return text.isascii() and text.isdigit()
+    if int(text) > LARGEST_WHOLE_NUMBER:
+        raise InvalidCursorError("cursor: not one this store issued")
+    return int(text)
 
 
 def _read_root(connection: sqlite3.Connection, project: str, row: RootRow) -> StoredRoot:

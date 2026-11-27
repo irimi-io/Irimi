@@ -24,6 +24,9 @@ def read_page_request(
 def _read_limit(text: str | None, default_limit: int, largest_limit: int) -> int:
     if text is None:
         return default_limit
-    if not (text.isascii() and text.isdigit()) or not 1 <= int(text) <= largest_limit:
+    is_short_whole_number = (
+        text.isascii() and text.isdigit() and len(text) <= len(str(largest_limit))
+    )
+    if not is_short_whole_number or not 1 <= int(text) <= largest_limit:
         raise InvalidPageRequestError(f"limit: expected a whole number from 1 to {largest_limit}")
     return int(text)

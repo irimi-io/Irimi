@@ -69,7 +69,7 @@ def create_reader_routes(storage: StorageEngine) -> list[Route]:
         Route(RUN_PATH, read_run, methods=["GET"]),
         Route(CALL_PATH, read_call, methods=["GET"]),
         Route(UNATTACHED_CALLS_PATH, list_unattached_calls, methods=["GET"]),
-        Route("/api/{version}/{rest:path}", refuse_unknown_reader_api_version, methods=["GET"]),
+        Route("/api/{version}/{rest:path}", refuse_unknown_reader_api_path, methods=["GET"]),
     ]
 
 
@@ -84,8 +84,10 @@ def _read_every_run_event(storage: StorageEngine, trace_id: str) -> tuple[Event,
             return tuple(events)
 
 
-async def refuse_unknown_reader_api_version(request: Request) -> JSONResponse:
+async def refuse_unknown_reader_api_path(request: Request) -> JSONResponse:
     version = request.path_params["version"]
+    if version in ACCEPTED_READER_API_VERSIONS:
+        return JSONResponse({"error": f"nothing is served at {request.url.path}"}, status_code=404)
     return JSONResponse(
         {
             "error": f"unknown reader API version: {version}",

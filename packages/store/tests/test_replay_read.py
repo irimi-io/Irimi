@@ -52,7 +52,16 @@ def test_reading_a_run_the_store_does_not_hold_is_not_found(store: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "query", ["limit=0", "limit=-1", "limit=many", "limit=1001", "cursor=not-a-cursor"]
+    "query",
+    [
+        "limit=0",
+        "limit=-1",
+        "limit=many",
+        "limit=1001",
+        "limit=" + "9" * 5000,
+        "cursor=not-a-cursor",
+        "cursor=99999999999999999999",
+    ],
 )
 def test_a_page_request_the_store_cannot_read_is_refused_with_the_reason(
     store: Any, query: str

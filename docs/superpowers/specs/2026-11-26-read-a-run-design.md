@@ -142,12 +142,13 @@ Pure functions over a run's events.
 
 Conditions are worked out from the root's start, the root's end and the count of events held, and
 nothing else. The list has exactly those three, so one function serves the list and the tree and
-they never disagree. A structural gap (a missing start, a missing parent, no root) is not a
+they agree for every run with one root. A trace with more than one root is the exception, below. A structural gap (a missing start, a missing parent, no root) is not a
 condition word: the tree shows it directly, as above. (proposed)
 
 A trace with more than one root start is a writer's mistake. The tree's `root` is the one with the
 lowest `seq`, then the earliest arrival, and the others are in `detached`. The list has a row per
-root start and does not merge them. (proposed)
+root span and does not merge them, so its rows for the other roots can state conditions the tree
+does not. A span started twice is one row, made from the start that arrived first. (proposed)
 
 ### Bodies
 

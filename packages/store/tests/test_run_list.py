@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,12 @@ CREATE TABLE events (
     created_at_unix_nano INTEGER NOT NULL,
     UNIQUE (project, trace_id, id)
 )
+"""
+OPEN_STORE_FILE = """
+import sys, time
+from pathlib import Path
+from irimi_store.sqlite_storage import SqliteStorageEngine
+SqliteStorageEngine(Path(sys.argv[1]), time.time_ns)
 """
 CONDITION_CASES = [
     ({"events_produced": 3}, {}, ["incomplete"]),
@@ -124,17 +132,43 @@ def test_run_pages_hold_while_runs_arrive(store: Any) -> None:
     assert ([run["id"] for run in second["runs"]], second["next_cursor"]) == (["t1"], None)
 
 
-@pytest.mark.parametrize("query", ["limit=0", "limit=201", "cursor=not-a-cursor"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "limit=0",
+        "limit=201",
+        "limit=" + "9" * 5000,
+        "cursor=not-a-cursor",
+        "cursor=1-99999999999999999999",
+        "cursor=99999999999999999999-1",
+    ],
+)
 def test_a_list_page_request_the_store_cannot_read_is_refused(store: Any, query: str) -> None:
     status, answer = store.get(f"/api/v1/runs?{query}")
 
     assert (status, bool(answer["error"])) == (400, True)
 
 
-def test_a_store_file_made_before_schema_versions_lists_its_runs(
-    tmp_path: Path, serve_store: Any
+def test_a_root_span_started_twice_is_listed_once_as_the_tree_shows_it(store: Any) -> None:
+    retried_start = {**start("t1", "s1", "run", 10, flags=["not_replayable"]), "id": "retry"}
+    store.post("/v1/events", {"events": [start("t1", "s1", "run", 50), retried_start]})
+
+    listed = store.get("/api/v1/runs")[1]["runs"]
+    tree = store.get("/api/v1/runs/t1")[1]["run"]
+
+    assert [(run["id"], run["start_time_unix_nano"]) for run in listed] == [("t1", "50")]
+    assert listed[0]["conditions"] == tree["conditions"] == ["unfinished"]
+
+
+def test_an_unknown_path_under_a_known_version_is_not_called_an_unknown_version(
+    store: Any,
 ) -> None:
-    database_path = tmp_path / "older.db"
+    status, answer = store.get("/api/v1/nothing")
+
+    assert (status, bool(answer["error"]), "accepted_versions" in answer) == (404, True, False)
+
+
+def make_store_file_from_before_schema_versions(database_path: Path, run_count: int) -> None:
     connection = sqlite3.connect(database_path)
     connection.execute(EVENTS_TABLE_BEFORE_SCHEMA_VERSIONS)
     connection.executemany(
@@ -142,18 +176,44 @@ def test_a_store_file_made_before_schema_versions_lists_its_runs(
         " parent_span_id, kind, name, seq, data, created_at_unix_nano)"
         " VALUES ('default', ?, 'e1', 'start', 's1', 100, NULL, ?, ?, 0, ?, 1)",
         [
-            ("t1", "workflow", "handle_ticket", json.dumps({"environment": "production"})),
             ("t2", "function", "loose_call", json.dumps({"flags": ["unattached"]})),
+            *(
+                (f"run-{number}", "workflow", "handle_ticket", '{"environment": "production"}')
+                for number in range(run_count)
+            ),
         ],
     )
     connection.commit()
     connection.close()
 
+
+@pytest.mark.parametrize("run_count_before_schema_versions", [2000, None])
+def test_a_store_file_opened_by_several_processes_at_once_still_opens(
+    tmp_path: Path, run_count_before_schema_versions: int | None
+) -> None:
+    database_path = tmp_path / "store.db"
+    if run_count_before_schema_versions is not None:
+        make_store_file_from_before_schema_versions(database_path, run_count_before_schema_versions)
+
+    openers = [
+        subprocess.Popen([sys.executable, "-c", OPEN_STORE_FILE, database_path]) for _ in range(6)
+    ]
+
+    assert [opener.wait(timeout=60) for opener in openers] == [0] * 6
+    SqliteStorageEngine(database_path, time.time_ns)
+
+
+def test_a_store_file_made_before_schema_versions_lists_its_runs(
+    tmp_path: Path, serve_store: Any
+) -> None:
+    database_path = tmp_path / "older.db"
+    make_store_file_from_before_schema_versions(database_path, run_count=1)
+
     with serve_store(SqliteStorageEngine(database_path, time.time_ns)) as store:
         _, runs = store.get("/api/v1/runs")
         _, calls = store.get("/api/v1/unattached-calls")
 
-    assert [(run["id"], run["environment"]) for run in runs["runs"]] == [("t1", "production")]
+    assert [(run["id"], run["environment"]) for run in runs["runs"]] == [("run-0", "production")]
     assert [call["id"] for call in calls["calls"]] == ["t2"]
 
 
