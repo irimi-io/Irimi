@@ -132,6 +132,54 @@ def test_a_streamed_request_body_is_not_recorded(
     assert call_start["flags"] == ["request_body_not_recorded"]
 
 
+@pytest.mark.parametrize(
+    ("status", "method", "refund", "recorded_body"),
+    [
+        (302, "GET", None, None),
+        (
+            307,
+            "POST",
+            {"amount": 5},
+            {"encoding": "text", "content_type": "application/json", "data": '{"amount":5}'},
+        ),
+    ],
+)
+def test_each_hop_of_a_followed_redirect_is_recorded_with_its_body(
+    recorded_events: TakeEvents,
+    upstream: Any,
+    http_library: Any,
+    status: int,
+    method: str,
+    refund: dict[str, int] | None,
+    recorded_body: dict[str, str] | None,
+) -> None:
+    upstream.set_answer("/v1/refunds", status=status, headers=[("Location", "/v2/refunds")])
+
+    @irimi.workflow
+    def send_refund() -> int:
+        with http_library.Client(follow_redirects=True) as client:
+            return int(
+                client.request(method, f"{upstream.url}/v1/refunds", json=refund).status_code
+            )
+
+    assert send_refund() == 200
+
+    starts = [event for event in recorded_events() if event.get("kind") == "http"]
+
+    assert [start["name"] for start in starts] == [
+        f"{method} 127.0.0.1/v1/refunds",
+        f"{method} 127.0.0.1/v2/refunds",
+    ]
+    for start in starts:
+        assert "flags" not in start
+        assert start["request"].get("body") == recorded_body
+    assert upstream.requests[-1] == (
+        method,
+        "/v2/refunds",
+        b'{"amount":5}' if refund is not None else b"",
+    )
+
+
 def test_a_streamed_response_is_recorded_whole_when_the_stream_ends(
     recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:

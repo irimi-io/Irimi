@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import ModuleType
 from typing import Any
@@ -14,6 +15,7 @@ PATCH_TARGETS = (
     "AsyncHTTPTransport.handle_async_request",
     "SyncByteStream",
     "AsyncByteStream",
+    "ByteStream",
     "RequestNotRead",
 )
 
@@ -38,6 +40,7 @@ class _ResponseRecording:
         self._body: BodyCopy | None = BodyCopy() if open_call.is_attached else None
         self._has_copy_failed = False
         self._is_ended = False
+        self._end_lock = threading.Lock()
 
     def add(self, chunk: bytes) -> None:
         if self._body is None:
@@ -50,9 +53,8 @@ class _ResponseRecording:
             self._interception.report_failure("copy an outbound response body")
 
     def end(self, is_body_complete: bool, error: BaseException | None) -> None:
-        if self._is_ended:
+        if not self._claim_end():
             return
-        self._is_ended = True
         try:
             outcome = CallOutcome(
                 response=self._response,
@@ -64,6 +66,13 @@ class _ResponseRecording:
             self._interception.report_failure("take the copy of an outbound response body")
             return
         self._interception.end(self._open_call, outcome)
+
+    def _claim_end(self) -> bool:
+        with self._end_lock:
+            if self._is_ended:
+                return False
+            self._is_ended = True
+            return True
 
 
 def _wrap_sync_transport(
@@ -78,7 +87,7 @@ def _wrap_sync_transport(
 
     @functools.wraps(send_request)
     def handle_request(transport: object, request: Any) -> Any:
-        open_call = _begin_call(interception, request, library.RequestNotRead)
+        open_call = _begin_call(interception, request, library)
         try:
             response = send_request(transport, request)
         except BaseException as error:
@@ -106,7 +115,7 @@ def _wrap_async_transport(
 
     @functools.wraps(send_request)
     async def handle_async_request(transport: object, request: Any) -> Any:
-        open_call = _begin_call(interception, request, library.RequestNotRead)
+        open_call = _begin_call(interception, request, library)
         try:
             response = await send_request(transport, request)
         except BaseException as error:
@@ -118,9 +127,9 @@ def _wrap_async_transport(
     return handle_async_request
 
 
-def _begin_call(interception: Interception, request: Any, request_not_read: Any) -> OpenCall | None:
+def _begin_call(interception: Interception, request: Any, library: ModuleType) -> OpenCall | None:
     try:
-        call = _translate_request(request, request_not_read)
+        call = _translate_request(request, library)
     except Exception:
         interception.report_failure("read an outbound request")
         return None
@@ -146,22 +155,28 @@ def _record_response(
         interception.report_failure("record an outbound response")
 
 
-def _translate_request(request: Any, request_not_read: Any) -> OutboundCall:
-    body = _read_request_body(request, request_not_read)
+def _translate_request(request: Any, library: ModuleType) -> OutboundCall:
+    in_memory_body = _find_in_memory_body(request, library)
     return OutboundCall(
         method=str(request.method),
         url=str(request.url),
         headers=_decode_headers(request.headers.raw),
-        body=body,
-        has_streamed_body=body is None,
+        body=in_memory_body or None,
+        has_streamed_body=in_memory_body is None,
     )
 
 
-def _read_request_body(request: Any, request_not_read: Any) -> bytes | None:
+def _find_in_memory_body(request: Any, library: ModuleType) -> bytes | None:
     try:
         return bytes(request.content)
-    except request_not_read:
+    except library.RequestNotRead:
+        return _read_unloaded_byte_stream(request.stream, library)
+
+
+def _read_unloaded_byte_stream(stream: Any, library: ModuleType) -> bytes | None:
+    if not isinstance(stream, library.ByteStream):
         return None
+    return b"".join(stream)
 
 
 def _translate_response(response: Any) -> OutboundResponse:

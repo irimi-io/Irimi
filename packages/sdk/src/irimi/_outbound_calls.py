@@ -62,7 +62,7 @@ def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
         flags.append("unattached")
     elif call.has_streamed_body:
         flags.append("request_body_not_recorded")
-    elif call.body:
+    elif call.body is not None:
         body = copy_body(call.body)
         request["body"] = _describe_body(body, call.headers)
         size += len(body.content)
