@@ -13,6 +13,7 @@ import pytest
 
 SECONDS_BETWEEN_SHUTDOWN_CHECKS = 0.01
 HTTP_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+RELEASE_PATH = "/release-answers"
 
 
 class FakeStore:
@@ -20,6 +21,8 @@ class FakeStore:
         self.batches: list[dict[str, Any]] = []
         self.paths: list[str] = []
         self.answer = b'{"refused": []}'
+        self._answers_released = threading.Event()
+        self._answers_released.set()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -27,12 +30,20 @@ class FakeStore:
     def url(self) -> str:
         return f"http://127.0.0.1:{self._server.server_port}"
 
+    @property
+    def release_url(self) -> str:
+        return f"{self.url}{RELEASE_PATH}"
+
     def take_events(self) -> list[dict[str, Any]]:
         events = [event for batch in self.batches for event in batch["events"]]
         self.batches.clear()
         return events
 
+    def hold_answers(self) -> None:
+        self._answers_released.clear()
+
     def close(self) -> None:
+        self._answers_released.set()
         self._server.shutdown()
         self._server.server_close()
 
@@ -42,12 +53,20 @@ class FakeStore:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 length = int(self.headers["Content-Length"])
+                if self.path == RELEASE_PATH:
+                    store._answers_released.set()
+                    self._answer(b"")
+                    return
                 store.paths.append(self.path)
                 store.batches.append(json.loads(self.rfile.read(length)))
+                store._answers_released.wait()
+                self._answer(store.answer)
+
+            def _answer(self, content: bytes) -> None:
                 self.send_response(200)
-                self.send_header("Content-Length", str(len(store.answer)))
+                self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
-                self.wfile.write(store.answer)
+                self.wfile.write(content)
 
             def log_message(self, format: str, *args: Any) -> None:
                 return

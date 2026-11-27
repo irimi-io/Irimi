@@ -90,14 +90,20 @@ class Exporter:
         with self._condition:
             self._condition.wait_for(lambda: len(self._pending) > 0)
             self._condition.wait_for(self._is_send_due, SEND_INTERVAL_SECONDS)
-            events: list[Event] = []
-            batch_size = 0
-            while self._pending and len(events) < BATCH_SIZE and batch_size < BATCH_SIZE_LIMIT:
-                event, approximate_size = self._pending.popleft()
-                events.append(event)
-                batch_size += approximate_size
-            self._pending_size -= batch_size
-            return tuple(events)
+            return self._take_events_within_limits()
+
+    def _take_events_within_limits(self) -> tuple[Event, ...]:
+        events: list[Event] = []
+        batch_size = 0
+        while self._pending and len(events) < BATCH_SIZE:
+            event, approximate_size = self._pending[0]
+            if events and batch_size + approximate_size > BATCH_SIZE_LIMIT:
+                break
+            self._pending.popleft()
+            events.append(event)
+            batch_size += approximate_size
+        self._pending_size -= batch_size
+        return tuple(events)
 
     def _is_send_due(self) -> bool:
         return (

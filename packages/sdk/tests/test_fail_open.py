@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 THREE_MEGABYTES = 3 * 1024 * 1024
+BATCH_SIZE_LIMIT = 8 * 1024 * 1024
 APP = """
 import irimi
 
@@ -101,24 +102,35 @@ def test_a_call_that_could_not_be_recorded_counts_as_not_sent(fake_store: Any) -
     assert output == "ch_123\nraised unchanged\nFalse\n"
 
 
-A_RUN_TOO_LARGE_TO_WAIT = """
+TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER = """
+import os
+import urllib.request
+
 @irimi.workflow
 def measure(text):
     return len(text)
 
-measure("x" * 70_000_000)
-measure("x")
+text = "x" * 40_000_000
+measure(text)
+measure(text)
+urllib.request.urlopen(urllib.request.Request(os.environ["RELEASE_URL"], b"", method="POST"))
 print(irimi.flush())
 """
 
 
 def test_events_beyond_the_memory_limit_are_dropped_and_counted(fake_store: Any) -> None:
-    output = run_app(f"irimi.init(store_url={fake_store.url!r})", teardown=A_RUN_TOO_LARGE_TO_WAIT)
+    fake_store.hold_answers()
+
+    output = run_app(
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER,
+        RELEASE_URL=fake_store.release_url,
+    )
 
     starts = [event for event in fake_store.take_events() if event.get("name") == "measure"]
 
     assert output == "ch_123\nFalse\n"
-    assert [start["input"]["args"] for start in starts] == [["x"]]
+    assert len(starts) == 1
 
 
 SIX_LARGE_ANSWERS = """
@@ -147,15 +159,20 @@ def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
         UPSTREAM_URL=upstream.url,
     )
 
-    bodies_per_batch = [
-        sum("body" in event.get("response", {}) for event in batch["events"])
+    body_sizes_per_batch = [
+        [
+            len(event["response"]["body"]["data"])
+            for event in batch["events"]
+            if "body" in event.get("response", {})
+        ]
         for batch in fake_store.batches
     ]
 
     assert output.endswith("True\n")
     assert len(fake_store.batches) >= 2
-    assert sum(bodies_per_batch) == 6
-    assert max(bodies_per_batch) <= 3
+    assert sum(map(len, body_sizes_per_batch)) == 6
+    for body_sizes in body_sizes_per_batch:
+        assert sum(body_sizes) <= BATCH_SIZE_LIMIT or len(body_sizes) == 1
 
 
 def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
