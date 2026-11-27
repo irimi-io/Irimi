@@ -77,8 +77,9 @@ def _switch_to_write_ahead_log(connection: sqlite3.Connection) -> None:
     while True:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError:
-            if time.monotonic() > give_up_at:
+        except sqlite3.OperationalError as error:
+            is_held_by_another_opener = error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+            if not is_held_by_another_opener or time.monotonic() > give_up_at:
                 raise
             time.sleep(SECONDS_BETWEEN_TRIES)
         else:

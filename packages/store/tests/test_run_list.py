@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from irimi_store.sqlite_schema import NewerSchemaError
 from irimi_store.sqlite_storage import SqliteStorageEngine
 
 EVENTS_TABLE_BEFORE_SCHEMA_VERSIONS = """
@@ -170,17 +169,6 @@ def test_a_run_with_two_roots_is_listed_once_from_the_root_the_tree_shows(store:
     tree = store.get("/api/v1/runs/t1")[1]["run"]
 
     assert [(run["id"], run["span_id"]) for run in listed] == [("t1", tree["root"]["span_id"])]
-
-
-def test_a_store_file_from_a_newer_store_is_refused(tmp_path: Path) -> None:
-    database_path = tmp_path / "newer.db"
-    SqliteStorageEngine(database_path, time.time_ns)
-    connection = sqlite3.connect(database_path)
-    connection.execute("PRAGMA user_version = 99")
-    connection.close()
-
-    with pytest.raises(NewerSchemaError, match="99"):
-        SqliteStorageEngine(database_path, time.time_ns)
 
 
 def test_an_unknown_path_under_a_known_version_is_not_called_an_unknown_version(

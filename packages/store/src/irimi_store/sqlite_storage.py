@@ -87,7 +87,7 @@ class SqliteStorageEngine:
     def read_run_events(
         self, project: str, trace_id: str, cursor: str | None, limit: int
     ) -> Page[Event]:
-        after_arrival = _read_arrival_cursor(cursor)
+        after_arrival = _read_arrival_cursor(cursor, 0)
         with self._open_connection() as connection:
             rows: list[ArrivedEventRow] = connection.execute(
                 SELECT_RUN_EVENTS, (project, trace_id, after_arrival, limit + 1)
@@ -108,7 +108,7 @@ class SqliteStorageEngine:
     def list_roots(
         self, project: str, root_set: RootSet, cursor: str | None, limit: int
     ) -> Page[StoredRoot]:
-        before_arrival = LARGEST_WHOLE_NUMBER if cursor is None else _read_cursor_number(cursor)
+        before_arrival = _read_arrival_cursor(cursor, LARGEST_WHOLE_NUMBER)
         with self._open_connection() as connection:
             rows: list[RootRow] = connection.execute(
                 SELECT_ROOTS, (project, root_set == "unattached_calls", before_arrival, limit + 1)
@@ -126,17 +126,15 @@ class SqliteStorageEngine:
             yield connection
 
 
-def _read_arrival_cursor(cursor: str | None) -> int:
-    return 0 if cursor is None else _read_cursor_number(cursor)
-
-
-def _read_cursor_number(text: str) -> int:
-    is_whole_number = text.isascii() and text.isdigit()
-    if not is_whole_number or len(text) > DIGITS_IN_LARGEST_WHOLE_NUMBER:
+def _read_arrival_cursor(cursor: str | None, arrival_on_the_first_page: int) -> int:
+    if cursor is None:
+        return arrival_on_the_first_page
+    is_whole_number = cursor.isascii() and cursor.isdigit()
+    if not is_whole_number or len(cursor) > DIGITS_IN_LARGEST_WHOLE_NUMBER:
         raise InvalidCursorError("cursor: not one this store issued")
-    if int(text) > LARGEST_WHOLE_NUMBER:
+    if int(cursor) > LARGEST_WHOLE_NUMBER:
         raise InvalidCursorError("cursor: not one this store issued")
-    return int(text)
+    return int(cursor)
 
 
 def _read_root(connection: sqlite3.Connection, project: str, row: RootRow) -> StoredRoot:

@@ -17,6 +17,7 @@ RUN_PATH = f"{RUNS_PATH}/{{trace_id}}"
 CALL_PATH = f"{RUN_PATH}/calls/{{span_id}}"
 UNATTACHED_CALLS_PATH = f"/api/{READER_API_VERSION}/unattached-calls"
 
+REFUSAL_REASON = "error"
 RUNS = "runs"
 RUN = "run"
 CALL = "call"
@@ -95,6 +96,10 @@ class RunTree:
     conditions: tuple[str, ...]
     root: Node | None
     detached: tuple[Node, ...]
+
+
+def write_refusal(reason: str) -> dict[str, JsonValue]:
+    return {REFUSAL_REASON: reason}
 
 
 def write_run(run: RunTree) -> dict[str, JsonValue]:

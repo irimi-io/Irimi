@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from irimi._wire import RUN_EVENTS_PATH, EndEvent, Event, JsonValue, StartEvent, write_event
+from irimi._wire import EndEvent, Event, JsonValue, StartEvent, write_event
 from irimi._wire.field_names import ENVIRONMENT, EVENTS_PRODUCED, MODE, STATUS
 
 from irimi_store.flags import read_flags
@@ -36,19 +36,12 @@ def assemble_run(trace_id: str, events: Sequence[Event]) -> RunTree:
     children = _group_children(spans)
     placed: set[str] = set()
     root_span = _pick_root(spans)
-    try:
-        root = None if root_span is None else _build_subtree(root_span, children, placed, 1)
-        detached = [
-            _build_subtree(span, children, placed, 1)
-            for span in spans.values()
-            if span.span_id not in placed and _has_no_parent_in_the_run(span, spans)
-        ]
-    except RunTooDeepError as error:
-        events_path = RUN_EVENTS_PATH.format(trace_id=trace_id)
-        raise RunTooDeepError(
-            f"run {trace_id} is nested more than {DEEPEST_TREE} calls deep;"
-            f" read its events at {events_path}"
-        ) from error
+    root = None if root_span is None else _build_subtree(root_span, children, placed, 1)
+    detached = [
+        _build_subtree(span, children, placed, 1)
+        for span in spans.values()
+        if span.span_id not in placed and _has_no_parent_in_the_run(span, spans)
+    ]
     looping = [_build_tree_node(span, ()) for span in spans.values() if span.span_id not in placed]
     return RunTree(
         id=trace_id,
@@ -161,7 +154,7 @@ def _build_subtree(
     span: Span, children: Mapping[str, list[Span]], placed: set[str], depth: int
 ) -> Node:
     if depth > DEEPEST_TREE:
-        raise RunTooDeepError
+        raise RunTooDeepError(f"nested more than {DEEPEST_TREE} calls deep")
     placed.add(span.span_id)
     child_nodes = tuple(
         _build_subtree(child, children, placed, depth + 1)

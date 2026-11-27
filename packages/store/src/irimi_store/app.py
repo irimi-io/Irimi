@@ -25,6 +25,7 @@ from irimi_store.page_requests import (
     read_page_request,
 )
 from irimi_store.pages import InvalidCursorError, Page
+from irimi_store.reader_documents import write_refusal
 from irimi_store.reader_routes import create_reader_routes
 from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, StorageEngine
 
@@ -38,7 +39,7 @@ def create_app(storage: StorageEngine) -> Starlette:
         try:
             parsed = await run_in_threadpool(_store_batch, storage, await request.body())
         except (ValueError, RecursionError) as error:
-            return JsonAnswer({"error": str(error)}, status_code=400)
+            return JsonAnswer(write_refusal(str(error)), status_code=400)
         return JsonAnswer(write_refused_events(parsed.refused))
 
     async def read_run_events(request: Request) -> JsonAnswer:
@@ -68,22 +69,24 @@ def create_app(storage: StorageEngine) -> Starlette:
 
 
 async def refuse_request(request: Request, error: Exception) -> JsonAnswer:
-    return JsonAnswer({"error": str(error)}, status_code=400)
+    return JsonAnswer(write_refusal(str(error)), status_code=400)
 
 
 async def answer_not_held(request: Request, error: Exception) -> JsonAnswer:
-    return JsonAnswer({"error": str(error)}, status_code=404)
+    return JsonAnswer(write_refusal(str(error)), status_code=404)
 
 
 async def refuse_run_too_deep(request: Request, error: Exception) -> JsonAnswer:
-    return JsonAnswer({"error": str(error)}, status_code=422)
+    events_path = RUN_EVENTS_PATH.format(**request.path_params)
+    reason = f"this run is {error}; read its events at {events_path}"
+    return JsonAnswer(write_refusal(reason), status_code=422)
 
 
 async def refuse_unknown_version(request: Request) -> JsonAnswer:
     version = request.path_params["version"]
     return JsonAnswer(
         {
-            "error": f"unknown wire format version: {version}",
+            **write_refusal(f"unknown wire format version: {version}"),
             "accepted_versions": list(ACCEPTED_VERSIONS),
         },
         status_code=404,
