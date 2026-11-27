@@ -67,11 +67,11 @@ def test_a_run_with_gaps_and_odd_values_is_printed(local_store_url: str, run_iri
 def test_a_run_whose_id_uses_every_kind_of_id_character_is_shown(
     local_store_url: str, run_irimi: Any
 ) -> None:
-    post_events(local_store_url, start("A.b~c-d_1", "s1", "run", 100))
+    post_events(local_store_url, start("A-b_1", "s1", "run", 100))
 
-    shown = run_irimi(local_store_url, "runs", "A.b~c-d_1")
+    shown = run_irimi(local_store_url, "runs", "A-b_1")
 
-    assert (shown.returncode, shown.stdout.splitlines()[0]) == (0, "run  A.b~c-d_1  unfinished")
+    assert (shown.returncode, shown.stdout.splitlines()[0]) == (0, "run  A-b_1  unfinished")
 
 
 def test_the_next_page_is_named(local_store_url: str, run_irimi: Any) -> None:

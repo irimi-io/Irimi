@@ -67,7 +67,7 @@ def test_a_malformed_event_is_refused_and_the_rest_of_the_batch_is_stored(
     assert read_run(store, "t7c1") == [RUN_START]
 
 
-@pytest.mark.parametrize("bad_id", ["", "a/b", "a b", "é", "a" * 129, 7])
+@pytest.mark.parametrize("bad_id", ["", "a/b", "a b", "é", "..", "a.b", "a~b", "a" * 129, 7])
 @pytest.mark.parametrize("id_name", ["id", "trace_id", "span_id", "parent_span_id"])
 def test_an_event_whose_id_cannot_sit_in_a_url_is_refused(
     store: Any, id_name: str, bad_id: Any
