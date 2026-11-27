@@ -35,7 +35,8 @@ class _ResponseRecording:
         self._interception = interception
         self._open_call = open_call
         self._response = response
-        self._body: BodyCopy | None = BodyCopy()
+        self._body: BodyCopy | None = BodyCopy() if open_call.is_attached else None
+        self._has_copy_failed = False
         self._is_ended = False
 
     def add(self, chunk: bytes) -> None:
@@ -45,6 +46,7 @@ class _ResponseRecording:
             self._body.add(chunk)
         except Exception:
             self._body = None
+            self._has_copy_failed = True
             self._interception.report_failure("copy an outbound response body")
 
     def end(self, is_body_complete: bool, error: BaseException | None) -> None:
@@ -55,11 +57,11 @@ class _ResponseRecording:
             outcome = CallOutcome(
                 response=self._response,
                 body=self._body.take() if self._body is not None else None,
-                is_body_complete=is_body_complete and self._body is not None,
+                is_body_complete=is_body_complete and not self._has_copy_failed,
                 error=error,
             )
         except Exception:
-            self._interception.report_failure("record the end of an outbound call")
+            self._interception.report_failure("take the copy of an outbound response body")
             return
         self._interception.end(self._open_call, outcome)
 
