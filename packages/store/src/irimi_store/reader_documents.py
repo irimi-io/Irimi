@@ -19,7 +19,6 @@ UNATTACHED_CALLS_PATH = f"/api/{READER_API_VERSION}/unattached-calls"
 
 RUNS = "runs"
 RUN = "run"
-CALLS = "calls"
 CALL = "call"
 ROOT = "root"
 DETACHED = "detached"
@@ -124,17 +123,13 @@ def parse_run(document: JsonValue) -> RunTree:
 
 
 def write_call(node: Node) -> dict[str, JsonValue]:
-    call = _write_node(node)
-    del call[CHILDREN]
-    return {CALL: call}
+    events: list[JsonValue] = [dict(event) for event in node.events]
+    return {CALL: _add_other_fields({**_write_core(node), EVENTS: events}, node.fields)}
 
 
 def write_run_page(page: Page[RunSummary]) -> dict[str, JsonValue]:
-    return _write_summary_page(RUNS, page)
-
-
-def write_unattached_call_page(page: Page[RunSummary]) -> dict[str, JsonValue]:
-    return _write_summary_page(CALLS, page)
+    summaries: list[JsonValue] = [_write_run_summary(summary) for summary in page.items]
+    return {RUNS: summaries, NEXT_CURSOR: page.next_cursor}
 
 
 def parse_run_page(document: JsonValue) -> Page[RunSummary]:
@@ -177,11 +172,6 @@ def read_list(document: dict[str, JsonValue], name: str, place: str) -> list[Jso
     if not isinstance(value, list):
         raise ReaderDocumentError(f"{place}.{name}: expected a list")
     return value
-
-
-def _write_summary_page(name: str, page: Page[RunSummary]) -> dict[str, JsonValue]:
-    summaries: list[JsonValue] = [_write_run_summary(summary) for summary in page.items]
-    return {name: summaries, NEXT_CURSOR: page.next_cursor}
 
 
 def _write_run_summary(summary: RunSummary) -> dict[str, JsonValue]:
@@ -231,8 +221,11 @@ def _parse_run_summary(document: JsonValue, place: str) -> RunSummary:
 
 def _write_node(node: Node) -> dict[str, JsonValue]:
     children: list[JsonValue] = [_write_node(child) for child in node.children]
-    events: list[JsonValue] = [dict(event) for event in node.events]
-    core: dict[str, JsonValue] = {
+    return _add_other_fields({**_write_core(node), CHILDREN: children}, node.fields)
+
+
+def _write_core(node: Node) -> dict[str, JsonValue]:
+    return {
         SPAN_ID: node.span_id,
         PARENT_SPAN_ID: node.parent_span_id,
         KIND: node.kind,
@@ -242,16 +235,12 @@ def _write_node(node: Node) -> dict[str, JsonValue]:
         END_TIME: write_time(node.end_time_unix_nano),
         STATUS: node.status,
         FLAGS: list(node.flags),
-        CHILDREN: children,
-        EVENTS: events,
     }
-    return _add_other_fields(core, node.fields)
 
 
 def _parse_node(document: JsonValue, place: str) -> Node:
     if not isinstance(document, dict):
         raise ReaderDocumentError(f"{place}: expected an object")
-    events = read_list(document, EVENTS, place)
     return Node(
         span_id=read_string(document, SPAN_ID, place),
         parent_span_id=_read_optional(document, PARENT_SPAN_ID, place, str),
@@ -263,7 +252,7 @@ def _parse_node(document: JsonValue, place: str) -> Node:
         status=document.get(STATUS),
         flags=tuple(read_list(document, FLAGS, place)),
         fields={name: value for name, value in document.items() if name not in NODE_KEYS},
-        events=tuple(event for event in events if isinstance(event, dict)),
+        events=(),
         children=_parse_nodes(document, CHILDREN, place),
     )
 

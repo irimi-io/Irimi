@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from irimi_store.sqlite_schema import NewerSchemaError
 from irimi_store.sqlite_storage import SqliteStorageEngine
 
 EVENTS_TABLE_BEFORE_SCHEMA_VERSIONS = """
@@ -69,13 +70,13 @@ def end(trace: str, span: str, time: int, **fields: Any) -> dict[str, Any]:
     }
 
 
-def test_runs_are_listed_newest_first_apart_from_unattached_calls(store: Any) -> None:
+def test_runs_are_listed_newest_arrival_first_apart_from_unattached_calls(store: Any) -> None:
     store.post(
         "/v1/events",
         {
             "events": [
-                start("t1", "s1", "older", 100, environment="production", mode="normal", input=[1]),
-                end("t1", "s1", 150, status="ok", events_produced=2, output="big"),
+                start("t1", "s1", "older", 500, environment="production", mode="normal", input=[1]),
+                end("t1", "s1", 550, status="ok", events_produced=2, output="big"),
                 start("t2", "s1", "newer", 200),
                 start("t2", "s2", "step", 210, parent="s1"),
                 start("t3", "s1", "loose_call", 300, kind="function", flags=["unattached"]),
@@ -92,8 +93,8 @@ def test_runs_are_listed_newest_first_apart_from_unattached_calls(store: Any) ->
         "span_id": "s1",
         "kind": "workflow",
         "name": "older",
-        "start_time_unix_nano": "100",
-        "end_time_unix_nano": "150",
+        "start_time_unix_nano": "500",
+        "end_time_unix_nano": "550",
         "status": "ok",
         "flags": [],
         "environment": "production",
@@ -102,7 +103,7 @@ def test_runs_are_listed_newest_first_apart_from_unattached_calls(store: Any) ->
     }
     assert runs["runs"][0]["conditions"] == ["unfinished"]
     assert runs["next_cursor"] is None
-    assert [(call["id"], call["flags"]) for call in calls["calls"]] == [("t3", ["unattached"])]
+    assert [(call["id"], call["flags"]) for call in calls["runs"]] == [("t3", ["unattached"])]
 
 
 @pytest.mark.parametrize(("root_end_fields", "start_fields", "conditions"), CONDITION_CASES)
@@ -139,8 +140,7 @@ def test_run_pages_hold_while_runs_arrive(store: Any) -> None:
         "limit=201",
         "limit=" + "9" * 5000,
         "cursor=not-a-cursor",
-        "cursor=1-99999999999999999999",
-        "cursor=99999999999999999999-1",
+        "cursor=99999999999999999999",
     ],
 )
 def test_a_list_page_request_the_store_cannot_read_is_refused(store: Any, query: str) -> None:
@@ -158,6 +158,29 @@ def test_a_root_span_started_twice_is_listed_once_as_the_tree_shows_it(store: An
 
     assert [(run["id"], run["start_time_unix_nano"]) for run in listed] == [("t1", "50")]
     assert listed[0]["conditions"] == tree["conditions"] == ["unfinished"]
+
+
+def test_a_run_with_two_roots_is_listed_once_from_the_root_the_tree_shows(store: Any) -> None:
+    store.post(
+        "/v1/events",
+        {"events": [start("t1", "s2", "second", 100, seq=1), start("t1", "s1", "first", 110)]},
+    )
+
+    listed = store.get("/api/v1/runs")[1]["runs"]
+    tree = store.get("/api/v1/runs/t1")[1]["run"]
+
+    assert [(run["id"], run["span_id"]) for run in listed] == [("t1", tree["root"]["span_id"])]
+
+
+def test_a_store_file_from_a_newer_store_is_refused(tmp_path: Path) -> None:
+    database_path = tmp_path / "newer.db"
+    SqliteStorageEngine(database_path, time.time_ns)
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA user_version = 99")
+    connection.close()
+
+    with pytest.raises(NewerSchemaError, match="99"):
+        SqliteStorageEngine(database_path, time.time_ns)
 
 
 def test_an_unknown_path_under_a_known_version_is_not_called_an_unknown_version(
@@ -214,7 +237,7 @@ def test_a_store_file_made_before_schema_versions_lists_its_runs(
         _, calls = store.get("/api/v1/unattached-calls")
 
     assert [(run["id"], run["environment"]) for run in runs["runs"]] == [("run-0", "production")]
-    assert [call["id"] for call in calls["calls"]] == ["t2"]
+    assert [call["id"] for call in calls["runs"]] == ["t2"]
 
 
 def test_an_unknown_reader_api_version_is_refused_with_the_accepted_versions(store: Any) -> None:

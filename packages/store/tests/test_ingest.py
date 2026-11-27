@@ -67,7 +67,29 @@ def test_a_malformed_event_is_refused_and_the_rest_of_the_batch_is_stored(
     assert read_run(store, "t7c1") == [RUN_START]
 
 
-@pytest.mark.parametrize("document", [b"not json", [], {"events": "none"}])
+@pytest.mark.parametrize("bad_id", ["", "a/b", "a b", "é", "a" * 129, 7])
+@pytest.mark.parametrize("id_name", ["id", "trace_id", "span_id", "parent_span_id"])
+def test_an_event_whose_id_cannot_sit_in_a_url_is_refused(
+    store: Any, id_name: str, bad_id: Any
+) -> None:
+    status, answer = store.post("/v1/events", {"events": [{**RUN_START, id_name: bad_id}]})
+
+    assert (status, [refused["index"] for refused in answer["refused"]]) == (200, [0])
+
+
+def test_a_string_holding_half_a_character_is_read_back_as_written(store: Any) -> None:
+    cut_short = {**RUN_START, "input": "cut \ud83d short"}
+
+    store.post("/v1/events", {"events": [cut_short]})
+
+    assert read_run(store, "t7c1") == [cut_short]
+    assert store.get("/api/v1/runs/t7c1/calls/s1")[1]["call"]["input"] == cut_short["input"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [b"not json", [], {"events": "none"}, b'{"events": [], "score": NaN}', b'{"x": -Infinity}'],
+)
 def test_a_malformed_batch_is_refused_with_the_reason(store: Any, document: Any) -> None:
     status, answer = store.post("/v1/events", document)
 
