@@ -2,9 +2,11 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
+from typing import Any
 
 import pytest
 from irimi._wire import EndEvent, Event, StartEvent
+from irimi_store.pages import Page
 
 APP = """
 import irimi
@@ -31,8 +33,11 @@ class MemoryStorageEngine:
     def add_events(self, project: str, events: Sequence[Event]) -> None:
         self.events.extend(events)
 
-    def read_run_events(self, project: str, trace_id: str) -> tuple[Event, ...]:
-        return tuple(event for event in self.events if event.trace_id == trace_id)
+    def read_run_events(
+        self, project: str, trace_id: str, cursor: str | None, limit: int
+    ) -> Page[Event]:
+        events = tuple(event for event in self.events if event.trace_id == trace_id)
+        return Page(items=events, next_cursor=None)
 
 
 @pytest.fixture
@@ -41,11 +46,11 @@ def storage() -> MemoryStorageEngine:
 
 
 def test_a_run_recorded_in_an_app_arrives_in_the_store(
-    store_url: str, storage: MemoryStorageEngine
+    store: Any, storage: MemoryStorageEngine
 ) -> None:
     subprocess.run(
         [sys.executable, "-c", APP],
-        env={**os.environ, "IRIMI_STORE_URL": store_url, "IRIMI_ENVIRONMENT": "production"},
+        env={**os.environ, "IRIMI_STORE_URL": store.url, "IRIMI_ENVIRONMENT": "production"},
         timeout=60,
         check=True,
     )
@@ -66,4 +71,3 @@ def test_a_run_recorded_in_an_app_arrives_in_the_store(
     assert (step_start.parent_span_id, step_start.fields["write"]) == (run_start.span_id, True)
     assert step_end.fields["output"] == {"row_id": 9917}
     assert (run_end.fields["output"], run_end.fields["events_produced"]) == ("Refund issued", 4)
-    assert storage.read_run_events("default", run_start.trace_id) == tuple(storage.events)

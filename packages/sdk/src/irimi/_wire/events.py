@@ -7,6 +7,7 @@ from irimi._wire.json_value import JsonValue
 
 WIRE_VERSION = "v1"
 EVENTS_PATH = f"/{WIRE_VERSION}/events"
+RUN_EVENTS_PATH = f"/{WIRE_VERSION}/runs/{{trace_id}}/events"
 EVENT_FIELD_NAMES = frozenset({"id", "type", "trace_id", "span_id", "time_unix_nano"})
 START_FIELD_NAMES = frozenset({"parent_span_id", "kind", "name", "seq"})
 LARGEST_WHOLE_NUMBER = 2**63 - 1
