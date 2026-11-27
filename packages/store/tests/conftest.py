@@ -4,7 +4,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,8 @@ def storage(tmp_path: Path) -> StorageEngine:
     return SqliteStorageEngine(tmp_path / "store.db", time.time_ns)
 
 
-@pytest.fixture
-def store(storage: StorageEngine) -> Iterator[StoreClient]:
+@contextmanager
+def serve(storage: StorageEngine) -> Iterator[StoreClient]:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(create_app(storage), log_level="warning"))
@@ -54,3 +55,14 @@ def store(storage: StorageEngine) -> Iterator[StoreClient]:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+@pytest.fixture
+def store(storage: StorageEngine) -> Iterator[StoreClient]:
+    with serve(storage) as client:
+        yield client
+
+
+@pytest.fixture
+def serve_store() -> Callable[[StorageEngine], AbstractContextManager[StoreClient]]:
+    return serve

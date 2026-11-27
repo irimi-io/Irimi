@@ -19,10 +19,10 @@ from starlette.routing import Route
 
 from irimi_store.page_requests import InvalidPageRequestError, read_page_request
 from irimi_store.pages import InvalidCursorError
-from irimi_store.storage import StorageEngine
+from irimi_store.reader_routes import create_reader_routes
+from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, StorageEngine
 
 ACCEPTED_VERSIONS = (WIRE_VERSION,)
-DEFAULT_PROJECT = "default"
 DEFAULT_EVENT_PAGE_LIMIT = 500
 LARGEST_EVENT_PAGE_LIMIT = 1000
 
@@ -37,21 +37,18 @@ def create_app(storage: StorageEngine) -> Starlette:
 
     async def read_run_events(request: Request) -> JSONResponse:
         trace_id: str = request.path_params["trace_id"]
-        try:
-            page_request = read_page_request(
-                request.query_params, DEFAULT_EVENT_PAGE_LIMIT, LARGEST_EVENT_PAGE_LIMIT
-            )
-            page = await run_in_threadpool(
-                storage.read_run_events,
-                DEFAULT_PROJECT,
-                trace_id,
-                page_request.cursor,
-                page_request.limit,
-            )
-        except (InvalidPageRequestError, InvalidCursorError) as error:
-            return JSONResponse({"error": str(error)}, status_code=400)
+        page_request = read_page_request(
+            request.query_params, DEFAULT_EVENT_PAGE_LIMIT, LARGEST_EVENT_PAGE_LIMIT
+        )
+        page = await run_in_threadpool(
+            storage.read_run_events,
+            DEFAULT_PROJECT,
+            trace_id,
+            page_request.cursor,
+            page_request.limit,
+        )
         if not page.items and page_request.cursor is None:
-            return JSONResponse({"error": f"no run with id {trace_id}"}, status_code=404)
+            raise NotHeldError(f"no run with id {trace_id}")
         batch = Batch(events=page.items, fields={NEXT_CURSOR: page.next_cursor})
         return JSONResponse(write_batch(batch))
 
@@ -60,8 +57,22 @@ def create_app(storage: StorageEngine) -> Starlette:
             Route(EVENTS_PATH, ingest_events, methods=["POST"]),
             Route(RUN_EVENTS_PATH, read_run_events, methods=["GET"]),
             Route("/{version}/events", refuse_unknown_version, methods=["POST"]),
-        ]
+            *create_reader_routes(storage),
+        ],
+        exception_handlers={
+            InvalidPageRequestError: refuse_request,
+            InvalidCursorError: refuse_request,
+            NotHeldError: answer_not_held,
+        },
     )
+
+
+async def refuse_request(request: Request, error: Exception) -> JSONResponse:
+    return JSONResponse({"error": str(error)}, status_code=400)
+
+
+async def answer_not_held(request: Request, error: Exception) -> JSONResponse:
+    return JSONResponse({"error": str(error)}, status_code=404)
 
 
 async def refuse_unknown_version(request: Request) -> JSONResponse:
