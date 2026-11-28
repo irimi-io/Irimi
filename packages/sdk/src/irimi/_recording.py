@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import itertools
 import secrets
-import threading
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,21 +19,15 @@ class Run:
     def __init__(self, trace_id: str, is_workflow: bool) -> None:
         self.trace_id = trace_id
         self.is_workflow = is_workflow
-        self._lock = threading.Lock()
-        self._calls_started = 0
-        self._events_produced = 0
+        self._calls_started = itertools.count()
+        self._events_produced = itertools.count(1)
 
     def count_start(self) -> int:
-        with self._lock:
-            seq = self._calls_started
-            self._calls_started += 1
-            self._events_produced += 1
-            return seq
+        next(self._events_produced)
+        return next(self._calls_started)
 
     def count_end(self) -> int:
-        with self._lock:
-            self._events_produced += 1
-            return self._events_produced
+        return next(self._events_produced)
 
 
 @dataclass(frozen=True)

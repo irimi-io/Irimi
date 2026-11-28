@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import atexit
 import os
+import queue
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
+from irimi._atomic_total import AtomicTotal
 from irimi._delivery import Delivery
 from irimi._drops import DropTally
 from irimi._wire import Event
@@ -21,96 +24,138 @@ RETRY_DELAY_SECONDS = 0.2
 EXIT_FLUSH_SECONDS = 5.0
 
 
+@dataclass(frozen=True)
+class _Offer:
+    event: Event
+    approximate_size: int
+
+
+@dataclass(frozen=True)
+class _FlushRequest:
+    is_reached: threading.Event = field(default_factory=threading.Event)
+
+
 class Exporter:
     def __init__(
         self, send_batch: Callable[[tuple[Event, ...]], Delivery], drops: DropTally
     ) -> None:
         self._send_batch = send_batch
         self._drops = drops
-        self._condition: threading.Condition
-        self._pending: deque[tuple[Event, int]]
-        self._pending_size: int
-        self._unsettled_count: int
-        self._waiting_flush_count: int
-        self._sender: threading.Thread | None
+        self._offers: queue.SimpleQueue[_Offer | _FlushRequest]
+        self._offers_made: AtomicTotal
+        self._sender_claims: AtomicTotal
+        self._waiting_count: AtomicTotal
+        self._waiting_size: AtomicTotal
+        self._flushes_waiting: AtomicTotal
+        self._sender_wakes: queue.SimpleQueue[None]
+        self._received: deque[_Offer | _FlushRequest]
         self._reset()
         atexit.register(self.flush, EXIT_FLUSH_SECONDS)
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(after_in_child=self._reset)
 
     def enqueue(self, event: Event, approximate_size: int) -> None:
-        with self._condition:
-            is_full = (
-                len(self._pending) >= QUEUE_LIMIT
-                or self._pending_size + approximate_size > QUEUE_SIZE_LIMIT
-            )
-            pending_size_before = self._pending_size
-            if not is_full:
-                self._pending.append((event, approximate_size))
-                self._pending_size += approximate_size
-                self._unsettled_count += 1
-                self._ensure_sender_is_running()
-            has_reached_size_limit = pending_size_before < BATCH_SIZE_LIMIT <= self._pending_size
-            if len(self._pending) in (1, BATCH_SIZE) or has_reached_size_limit:
-                self._condition.notify_all()
-        if is_full:
+        waiting_count = self._waiting_count.add(1)
+        waiting_size = self._waiting_size.add(approximate_size)
+        if waiting_count > QUEUE_LIMIT or waiting_size > QUEUE_SIZE_LIMIT:
+            self._waiting_count.add(-1)
+            self._waiting_size.add(-approximate_size)
             self._drops.record(1, "irimi events were dropped: too many are waiting to be sent")
+            return
+        self._offers.put(_Offer(event, approximate_size))
+        self._offers_made.add(1)
+        self._start_sender_if_none_runs()
+        if waiting_count >= BATCH_SIZE or waiting_size >= BATCH_SIZE_LIMIT:
+            self._wake_sender()
 
     def flush(self, timeout: float | None = None) -> bool:
-        with self._condition:
-            self._waiting_flush_count += 1
-            self._condition.notify_all()
-            is_drained = self._condition.wait_for(lambda: self._unsettled_count == 0, timeout)
-            self._waiting_flush_count -= 1
-            return is_drained
+        if self._offers_made.read() == 0:
+            return True
+        self._start_sender_if_none_runs()
+        request = _FlushRequest()
+        self._flushes_waiting.add(1)
+        try:
+            self._offers.put(request)
+            self._wake_sender()
+            return request.is_reached.wait(timeout)
+        finally:
+            self._flushes_waiting.add(-1)
 
     def _reset(self) -> None:
-        self._condition = threading.Condition()
-        self._pending = deque()
-        self._pending_size = 0
-        self._unsettled_count = 0
-        self._waiting_flush_count = 0
-        self._sender = None
+        self._offers = queue.SimpleQueue()
+        self._offers_made = AtomicTotal()
+        self._sender_claims = AtomicTotal()
+        self._waiting_count = AtomicTotal()
+        self._waiting_size = AtomicTotal()
+        self._flushes_waiting = AtomicTotal()
+        self._sender_wakes = queue.SimpleQueue()
+        self._received = deque()
 
-    def _ensure_sender_is_running(self) -> None:
-        if self._sender is not None:
-            return
-        self._sender = threading.Thread(target=self._send_forever, name="irimi-export", daemon=True)
-        self._sender.start()
+    def _start_sender_if_none_runs(self) -> None:
+        if self._sender_claims.read() == 0:
+            threading.Thread(
+                target=self._send_as_the_only_sender, name="irimi-export", daemon=True
+            ).start()
+
+    def _send_as_the_only_sender(self) -> None:
+        if self._sender_claims.add(1) == 1:
+            self._send_forever()
+
+    def _wake_sender(self) -> None:
+        if self._sender_wakes.empty():
+            self._sender_wakes.put(None)
 
     def _send_forever(self) -> None:
         while True:
-            batch = self._take_batch()
-            self._deliver(batch)
-            with self._condition:
-                self._unsettled_count -= len(batch)
-                self._condition.notify_all()
+            self._wait_until_send_is_due()
+            self._receive_offers()
+            events, flushes_reached = self._take_batch()
+            if events:
+                self._deliver(events)
+            for flush in flushes_reached:
+                flush.is_reached.set()
 
-    def _take_batch(self) -> tuple[Event, ...]:
-        with self._condition:
-            self._condition.wait_for(lambda: len(self._pending) > 0)
-            self._condition.wait_for(self._is_send_due, SEND_INTERVAL_SECONDS)
-            return self._take_events_within_limits()
-
-    def _take_events_within_limits(self) -> tuple[Event, ...]:
-        events: list[Event] = []
-        batch_size = 0
-        while self._pending and len(events) < BATCH_SIZE:
-            event, approximate_size = self._pending[0]
-            if events and batch_size + approximate_size > BATCH_SIZE_LIMIT:
-                break
-            self._pending.popleft()
-            events.append(event)
-            batch_size += approximate_size
-        self._pending_size -= batch_size
-        return tuple(events)
+    def _wait_until_send_is_due(self) -> None:
+        if not self._received:
+            self._received.append(self._offers.get())
+        deadline = time.monotonic() + SEND_INTERVAL_SECONDS
+        while not self._is_send_due():
+            try:
+                self._sender_wakes.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                return
 
     def _is_send_due(self) -> bool:
         return (
-            len(self._pending) >= BATCH_SIZE
-            or self._pending_size >= BATCH_SIZE_LIMIT
-            or self._waiting_flush_count > 0
+            self._waiting_count.read() >= BATCH_SIZE
+            or self._waiting_size.read() >= BATCH_SIZE_LIMIT
+            or self._flushes_waiting.read() > 0
         )
+
+    def _receive_offers(self) -> None:
+        while True:
+            try:
+                self._received.append(self._offers.get_nowait())
+            except queue.Empty:
+                return
+
+    def _take_batch(self) -> tuple[tuple[Event, ...], tuple[_FlushRequest, ...]]:
+        events: list[Event] = []
+        flushes_reached: list[_FlushRequest] = []
+        batch_size = 0
+        while self._received:
+            offer = self._received[0]
+            if isinstance(offer, _FlushRequest):
+                flushes_reached.append(offer)
+            elif _has_room(len(events), batch_size, offer.approximate_size):
+                events.append(offer.event)
+                batch_size += offer.approximate_size
+            else:
+                break
+            self._received.popleft()
+        self._waiting_count.add(-len(events))
+        self._waiting_size.add(-batch_size)
+        return tuple(events), tuple(flushes_reached)
 
     def _deliver(self, batch: tuple[Event, ...]) -> None:
         try:
@@ -140,3 +185,9 @@ class Exporter:
             time.sleep(RETRY_DELAY_SECONDS * attempt)
             delivery = self._send_batch(batch)
         return delivery
+
+
+def _has_room(batch_count: int, batch_size: int, next_size: int) -> bool:
+    if batch_count == 0:
+        return True
+    return batch_count < BATCH_SIZE and batch_size + next_size <= BATCH_SIZE_LIMIT

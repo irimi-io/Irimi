@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from collections import Counter
 from typing import Any
 
 import pytest
@@ -79,6 +80,51 @@ async def main():
             print(await answer.text())
 
 asyncio.run(main())
+"""
+
+
+CALLS_RECORDED_INSIDE_EVERY_STEP_OF_IRIMI = """
+import os
+import sys
+import threading
+import urllib3
+import irimi
+
+irimi_directory = os.path.dirname(irimi.__file__)
+steps_interrupted = set()
+
+@irimi.function
+def note():
+    return None
+
+def record_a_call_inside_each_step_of_irimi(frame, event, argument):
+    if not frame.f_code.co_filename.startswith(irimi_directory):
+        return None
+    frame.f_trace_opcodes = True
+    step = (frame.f_code, frame.f_lasti)
+    if event == "opcode" and step not in steps_interrupted:
+        steps_interrupted.add(step)
+        note()
+    return record_a_call_inside_each_step_of_irimi
+
+@irimi.workflow
+def handle_ticket():
+    note()
+    return urllib3.request("GET", os.environ["UPSTREAM_URL"] + "/orders").status
+
+@irimi.workflow
+def measure(text):
+    return len(text)
+
+irimi.init(store_url=os.environ["STORE_URL"])
+threading.settrace(record_a_call_inside_each_step_of_irimi)
+sys.settrace(record_a_call_inside_each_step_of_irimi)
+print(handle_ticket())
+print(irimi.flush())
+measure("x" * 70_000_000)
+print(irimi.flush())
+sys.settrace(None)
+print(irimi.flush())
 """
 
 
@@ -272,6 +318,61 @@ def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
     assert sum(map(len, body_sizes_per_batch)) == 6
     for body_sizes in body_sizes_per_batch:
         assert sum(body_sizes) <= BATCH_SIZE_LIMIT or len(body_sizes) == 1
+
+
+REQUESTS_FLUSHED_WHILE_THE_STORE_HANGS = """
+import os
+import urllib.request
+
+for ticket_id in ("T-1043", "T-1044", "T-1045"):
+    print(irimi.flush(0.01))
+    handle_ticket(ticket_id)
+urllib.request.urlopen(urllib.request.Request(os.environ["RELEASE_URL"], b"", method="POST"))
+print(irimi.flush())
+"""
+
+
+def test_flushes_that_timed_out_do_not_split_what_is_sent_afterwards(fake_store: Any) -> None:
+    fake_store.hold_answers()
+
+    output = run_app(
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=REQUESTS_FLUSHED_WHILE_THE_STORE_HANGS,
+        RELEASE_URL=fake_store.release_url,
+    )
+
+    events_per_batch = [len(batch["events"]) for batch in fake_store.batches]
+
+    assert output == "ch_123\nFalse\nFalse\nFalse\nTrue\n"
+    assert sum(events_per_batch) == 16
+    assert len(events_per_batch) <= 2
+
+
+def test_a_call_recorded_while_irimi_is_recording_another_neither_blocks_nor_is_miscounted(
+    fake_store: Any, upstream: Any
+) -> None:
+    output = run_script(
+        CALLS_RECORDED_INSIDE_EVERY_STEP_OF_IRIMI,
+        STORE_URL=fake_store.url,
+        UPSTREAM_URL=upstream.url,
+    )
+
+    events = fake_store.take_events()
+    starts = [event for event in events if event["type"] == "start"]
+    started = Counter(start["span_id"] for start in starts)
+    ended = Counter(event["span_id"] for event in events if event["type"] == "end")
+    numbers_per_run: dict[str, list[int]] = {}
+    for start in starts:
+        numbers_per_run.setdefault(start["trace_id"], []).append(start["seq"])
+
+    assert output == "200\nTrue\nFalse\nTrue\n"
+    assert len(starts) > 100
+    assert "measure" not in [start["name"] for start in starts]
+    assert set(ended.values()) == {1}
+    assert not started - ended
+    assert len(ended - started) == 1
+    for numbers in numbers_per_run.values():
+        assert sorted(numbers) == list(range(len(numbers)))
 
 
 def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
