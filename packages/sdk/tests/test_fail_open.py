@@ -320,6 +320,34 @@ def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
         assert sum(body_sizes) <= BATCH_SIZE_LIMIT or len(body_sizes) == 1
 
 
+REQUESTS_FLUSHED_WHILE_THE_STORE_HANGS = """
+import os
+import urllib.request
+
+for ticket_id in ("T-1043", "T-1044", "T-1045"):
+    print(irimi.flush(0.01))
+    handle_ticket(ticket_id)
+urllib.request.urlopen(urllib.request.Request(os.environ["RELEASE_URL"], b"", method="POST"))
+print(irimi.flush())
+"""
+
+
+def test_flushes_that_timed_out_do_not_split_what_is_sent_afterwards(fake_store: Any) -> None:
+    fake_store.hold_answers()
+
+    output = run_app(
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=REQUESTS_FLUSHED_WHILE_THE_STORE_HANGS,
+        RELEASE_URL=fake_store.release_url,
+    )
+
+    events_per_batch = [len(batch["events"]) for batch in fake_store.batches]
+
+    assert output == "ch_123\nFalse\nFalse\nFalse\nTrue\n"
+    assert sum(events_per_batch) == 16
+    assert len(events_per_batch) <= 2
+
+
 def test_a_call_recorded_while_irimi_is_recording_another_neither_blocks_nor_is_miscounted(
     fake_store: Any, upstream: Any
 ) -> None:
