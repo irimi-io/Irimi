@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import inspect
 import threading
+import weakref
 from collections.abc import Callable, Iterator
 from types import GeneratorType, ModuleType
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from irimi._bodies import BODY_LIMIT
 from irimi._interception import Interception, OpenCall
 from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundResponse
-from irimi._response_recording import ResponseRecording
+from irimi._response_recording import ResponseRecording, end_without_response
 
 FOLLOWED_RESPONSE_ATTRIBUTE = "_irimi_followed_response"
 LEADING_REQUEST_PARAMETERS = ["self", "conn", "method", "url"]
@@ -57,8 +58,9 @@ def _reads_a_body_as_expected(response_class: object) -> bool:
 
 
 class _Attempt:
-    def __init__(self, open_call: OpenCall) -> None:
+    def __init__(self, open_call: OpenCall, connection: Any) -> None:
         self.open_call = open_call
+        self.connection = connection
         self.recording: ResponseRecording | None = None
 
 
@@ -83,7 +85,7 @@ class _ResponseFollowing:
         if followed is not None:
             return followed
         attempt: _Attempt | None = getattr(self._waiting, "attempt", None)
-        if attempt is None:
+        if attempt is None or not _reads_from_connection(response, attempt.connection):
             return None
         return self._claim(attempt, response)
 
@@ -107,8 +109,7 @@ class _ResponseFollowing:
         if attempt.recording is not None:
             attempt.recording.end(was_read_to_end=False, error=error)
             return
-        outcome = CallOutcome(response=None, body=None, was_read_to_end=False, error=error)
-        self._interception.end(attempt.open_call, outcome)
+        end_without_response(self._interception, attempt.open_call, error)
 
     def record_read(self, followed: _FollowedResponse, response: Any, content: bytes) -> None:
         try:
@@ -116,6 +117,15 @@ class _ResponseFollowing:
                 followed.recording.add(content)
             if response.isclosed():
                 followed.recording.end(was_read_to_end=True, error=None)
+        except Exception:
+            self._interception.report_failure("record an outbound response")
+
+    def end_stopped_read(
+        self, followed: _FollowedResponse, response: Any, error: BaseException | None
+    ) -> None:
+        try:
+            if response.isclosed():
+                followed.recording.end(was_read_to_end=False, error=error)
         except Exception:
             self._interception.report_failure("record an outbound response")
 
@@ -136,6 +146,7 @@ class _ResponseFollowing:
                 self._interception, attempt.open_call, _translate_response(response)
             )
             followed = _FollowedResponse(recording)
+            weakref.finalize(response, recording.end, was_read_to_end=False, error=None)
             vars(response)[FOLLOWED_RESPONSE_ATTRIBUTE] = followed
             attempt.recording = recording
         except Exception:
@@ -159,6 +170,13 @@ class _ResponseFollowing:
 
 def _is_reading_chunks(followed: _FollowedResponse) -> bool:
     return followed.chunked_reader is not None and followed.chunked_reader.gi_running
+
+
+def _reads_from_connection(response: Any, connection: Any) -> bool:
+    try:
+        return bool(response.fileno() == connection.sock.fileno())
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _wrap_make_request(
@@ -185,7 +203,7 @@ def _wrap_make_request(
         )
         if open_call is None:
             return send_request(pool, conn, method, url, *arguments, **options)
-        attempt = _Attempt(open_call)
+        attempt = _Attempt(open_call, conn)
         outer_attempt = following.swap_waiting_attempt(attempt)
         try:
             response = send_request(pool, conn, method, url, *arguments, **options)
@@ -209,7 +227,7 @@ def _wrap_raw_read(read: Callable[..., Any], following: _ResponseFollowing) -> C
         try:
             content = read(response, *arguments, **options)
         except BaseException as error:
-            followed.recording.end(was_read_to_end=False, error=error)
+            following.end_stopped_read(followed, response, error)
             raise
         following.record_read(followed, response, content)
         return content
@@ -245,25 +263,27 @@ def _wrap_read_chunked(
         try:
             yield from reader
         except GeneratorExit:
-            followed.recording.end(was_read_to_end=False, error=None)
+            following.end_stopped_read(followed, response, None)
             raise
         except BaseException as error:
-            followed.recording.end(was_read_to_end=False, error=error)
+            following.end_stopped_read(followed, response, error)
             raise
         following.record_read(followed, response, b"")
 
     return read_chunked
 
 
-def _wrap_close(close: Callable[..., Any], following: _ResponseFollowing) -> Callable[..., Any]:
-    @functools.wraps(close)
-    def close_response(response: Any, *arguments: Any, **options: Any) -> None:
+def _wrap_close(
+    close_response: Callable[..., Any], following: _ResponseFollowing
+) -> Callable[..., Any]:
+    @functools.wraps(close_response)
+    def close(response: Any, *arguments: Any, **options: Any) -> None:
         try:
             following.end_closed_response(response)
         finally:
-            close(response, *arguments, **options)
+            close_response(response, *arguments, **options)
 
-    return close_response
+    return close
 
 
 def _begin_call(

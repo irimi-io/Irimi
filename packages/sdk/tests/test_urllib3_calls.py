@@ -73,6 +73,29 @@ def test_a_streamed_request_body_is_not_recorded(
     assert call_start["flags"] == ["request_body_not_recorded"]
 
 
+def test_a_response_sent_as_a_request_body_is_not_recorded_as_the_answer(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    upstream.set_answer("/copies", status=201)
+
+    @irimi.workflow
+    def forward_report() -> int:
+        report = urllib3.HTTPResponse(body=io.BytesIO(b"report"), status=418, preload_content=False)
+        headers = {"Content-Length": "6"}
+        return urllib3.request(
+            "POST", f"{upstream.url}/copies", body=report, headers=headers
+        ).status
+
+    assert forward_report() == 201
+
+    ((call_start, call_end),) = take_calls(recorded_events)
+
+    assert upstream.requests[-1][2] == b"report"
+    assert call_start["flags"] == ["request_body_not_recorded"]
+    assert call_end["response"]["status"] == 201
+    assert call_end["response"]["body"]["data"] == '{"ok": true}'
+
+
 def test_the_request_headers_recorded_are_the_ones_the_app_set(
     recorded_events: TakeEvents, upstream: Any
 ) -> None:
@@ -197,6 +220,45 @@ def test_a_response_dropped_unread_is_recorded_when_it_is_collected(
     assert call_end["status"] == "ok"
     assert call_end["flags"] == ["response_body_incomplete"]
     assert call_end["response"]["body"]["data"] == "x" * 10
+
+
+def test_a_response_whose_connection_the_pool_closed_is_recorded_when_it_is_collected(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    upstream.set_answer("/archive", chunks=[b"x" * 3 * HALF_A_MEGABYTE])
+
+    @irimi.workflow
+    def skip_archive() -> None:
+        with urllib3.connection_from_url(upstream.url) as pool:
+            archive = pool.request("GET", "/archive", preload_content=False)
+            archive.release_conn()
+
+    skip_archive()
+    gc.collect()
+
+    ((_, call_end),) = take_calls(recorded_events)
+
+    assert call_end["status"] == "ok"
+    assert call_end["flags"] == ["response_body_incomplete"]
+
+
+def test_a_read_that_fails_and_leaves_the_response_readable_does_not_end_its_call(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    @irimi.workflow
+    def read_order() -> bytes:
+        answer = urllib3.request("GET", f"{upstream.url}/orders", preload_content=False)
+        with pytest.raises(urllib3.exceptions.ResponseNotChunked):
+            next(answer.read_chunked())
+        return answer.read()
+
+    assert read_order() == b'{"ok": true}'
+
+    ((_, call_end),) = take_calls(recorded_events)
+
+    assert call_end["status"] == "ok"
+    assert call_end["response"]["body"]["data"] == '{"ok": true}'
+    assert "flags" not in call_end
 
 
 def test_a_response_with_nothing_to_read_ends_without_being_read(
