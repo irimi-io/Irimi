@@ -32,6 +32,7 @@ class OutboundCall:
 class OutboundResponse:
     status: int
     headers: Headers
+    is_body_decoded: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,10 +103,10 @@ def describe_outcome(outcome: CallOutcome, is_attached: bool) -> Payload:
 def _was_closed_after_an_event(outcome: CallOutcome, body: CopiedBody | None) -> bool:
     if outcome.error is not None or outcome.response is None or body is None:
         return False
-    headers = outcome.response.headers
+    content_type = _find_header(outcome.response.headers, "content-type") or ""
     is_readable_event_stream = (
-        (_find_header(headers, "content-type") or "").lower().startswith(EVENT_STREAM_TYPE)
-        and _find_header(headers, "content-encoding") is None
+        content_type.lower().startswith(EVENT_STREAM_TYPE)
+        and _find_body_encoding(outcome.response) is None
         and not body.is_truncated
     )
     return is_readable_event_stream and body.content.endswith(EVENT_ENDINGS)
@@ -135,9 +136,20 @@ def _describe_response(
     }
     size = _measure_header_values(response.headers)
     if body is not None and body.content:
-        described["body"] = _describe_body(body, response.headers, is_whole)
+        described["body"] = describe_body(
+            body,
+            _find_header(response.headers, "content-type"),
+            _find_body_encoding(response),
+            is_whole,
+        )
         size += len(body.content)
     return Payload(described, size)
+
+
+def _find_body_encoding(response: OutboundResponse) -> str | None:
+    if response.is_body_decoded:
+        return None
+    return _find_header(response.headers, "content-encoding")
 
 
 def _describe_body(body: CopiedBody, headers: Headers, is_whole: bool) -> dict[str, JsonValue]:

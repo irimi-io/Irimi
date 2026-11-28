@@ -275,7 +275,7 @@ def print_init_results(arguments: str) -> str:
 
 
 def test_init_reports_the_libraries_it_patched(fake_store: Any) -> None:
-    patched = "patched=('httpx', 'httpx2'), unpatched=('urllib3', 'aiohttp')"
+    patched = "patched=('httpx', 'httpx2', 'aiohttp'), unpatched=('urllib3',)"
 
     assert print_init_results(f"store_url={fake_store.url!r}") == (
         f"InitResult(mode='normal', {patched})\n" * 2
