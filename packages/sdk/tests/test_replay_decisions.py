@@ -1,16 +1,27 @@
 import base64
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 from irimi._recorded_calls import (
+    CallRole,
     NotReplayableError,
+    RecordedCall,
     RecordedOutput,
     RecordedResponse,
     read_recorded_run,
 )
-from irimi._wire import Event, parse_event
+from irimi._replay_decisions import (
+    FAKED_UNDESCRIBED_CALL,
+    CandidateCall,
+    Decision,
+    ReplayDecider,
+)
+from irimi._replay_fields import describe_decision
+from irimi._wire import Event, JsonValue, parse_event
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -254,3 +265,161 @@ def test_content_encoding_is_kept_when_the_body_description_names_it() -> None:
 
     assert isinstance(result, RecordedResponse)
     assert ("content-encoding", "gzip") in result.headers
+
+
+SERVED_OUTPUT = RecordedOutput(1)
+
+
+def recorded(
+    span_id: str,
+    role: CallRole,
+    name: str = "call",
+    key: JsonValue = "key",
+    result: RecordedResponse | RecordedOutput | None = SERVED_OUTPUT,
+) -> RecordedCall:
+    return RecordedCall(span_id, name, int(span_id[1:]), role, key, result)
+
+
+def candidate(role: CallRole, key: JsonValue = "key", name: str = "call") -> CandidateCall:
+    return CandidateCall(role, name, key)
+
+
+@pytest.mark.parametrize(
+    ("role", "key", "expected"),
+    [
+        ("plain", "other", ("live", "s1", "same kind and name", False, ())),
+        ("llm", "key", ("recorded", "s1", "same request", False, ())),
+        ("llm", "other", ("live", "s1", "same kind and name", False, ())),
+        ("http_read", "key", ("recorded", "s1", "same request", False, ())),
+        ("http_read", "other", ("live", None, None, False, ("unmatched_read",))),
+        ("read_function", "key", ("recorded", "s1", "same request", False, ())),
+        ("read_function", "other", ("live", None, None, False, ("unmatched_read",))),
+        ("http_write", "key", ("recorded", "s1", "same request", False, ())),
+        ("http_write", "other", ("recorded", "s1", "same name, same position", True, ())),
+        ("write_function", "key", ("recorded", "s1", "same request", False, ())),
+        ("write_function", "other", ("recorded", "s1", "same name, same position", True, ())),
+    ],
+)
+def test_a_call_with_a_recording_is_answered_by_its_role(
+    role: CallRole, key: str, expected: tuple[Any, ...]
+) -> None:
+    decision = ReplayDecider((recorded("s1", role),)).decide(candidate(role, key))
+
+    answer, span_id, rule, is_changed, flags = expected
+    assert decision.answer == answer
+    assert (decision.matched.span_id if decision.matched else None) == span_id
+    assert (decision.rule, decision.is_changed, decision.flags) == (rule, is_changed, flags)
+    assert decision.role == role
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("plain", ("live", ())),
+        ("llm", ("live", ())),
+        ("http_read", ("live", ("unmatched_read",))),
+        ("read_function", ("live", ("unmatched_read",))),
+        ("http_write", ("faked", ("new_write",))),
+        ("write_function", ("faked", ("new_write",))),
+    ],
+)
+def test_a_call_with_no_recording_is_answered_by_its_role(
+    role: CallRole, expected: tuple[str, tuple[str, ...]]
+) -> None:
+    decision = ReplayDecider(()).decide(candidate(role))
+
+    assert (decision.answer, decision.flags) == expected
+    assert decision.matched is None
+    assert decision.rule is None
+    assert not decision.is_changed
+
+
+def test_identical_reads_are_answered_in_recorded_order() -> None:
+    decider = ReplayDecider(
+        (
+            recorded("s1", "http_read", key="charge"),
+            recorded("s2", "http_write", key="refund"),
+            recorded("s3", "http_read", key="charge"),
+        )
+    )
+
+    decisions = [
+        decider.decide(candidate("http_read", "charge")),
+        decider.decide(candidate("http_write", "refund")),
+        decider.decide(candidate("http_read", "charge")),
+    ]
+
+    assert [d.answer for d in decisions] == ["recorded", "recorded", "recorded"]
+    assert [d.matched.span_id for d in decisions if d.matched] == ["s1", "s2", "s3"]
+
+
+def test_a_third_identical_read_goes_live_and_is_flagged() -> None:
+    decider = ReplayDecider((recorded("s1", "http_read"), recorded("s2", "http_read")))
+    decisions = [decider.decide(candidate("http_read")) for _ in range(3)]
+
+    assert [d.answer for d in decisions] == ["recorded", "recorded", "live"]
+    assert decisions[2].flags == ("unmatched_read",)
+    assert decisions[2].matched is None
+
+
+@pytest.mark.parametrize(("key", "is_changed"), [("key", False), ("other", True)])
+def test_a_write_whose_recorded_value_cannot_be_served_is_paired_and_faked(
+    key: str, is_changed: bool
+) -> None:
+    unservable = recorded("s1", "http_write", result=None)
+
+    decision = ReplayDecider((unservable,)).decide(candidate("http_write", key))
+
+    assert decision.answer == "faked"
+    assert decision.matched == unservable
+    assert decision.flags == ("recorded_value_unservable",)
+    assert decision.is_changed is is_changed
+
+
+@pytest.mark.parametrize("role", ["llm", "http_read", "read_function"])
+def test_a_read_whose_recorded_value_cannot_be_served_goes_live_but_stays_paired(
+    role: CallRole,
+) -> None:
+    unservable = recorded("s1", role, result=None)
+
+    decision = ReplayDecider((unservable,)).decide(candidate(role))
+
+    assert decision.answer == "live"
+    assert decision.matched == unservable
+    assert decision.rule == "same request"
+    assert decision.flags == ("recorded_value_unservable",)
+
+
+def test_each_recorded_call_is_served_once_under_concurrent_callers() -> None:
+    decider = ReplayDecider((recorded("s1", "http_read"), recorded("s2", "http_read")))
+    barrier = threading.Barrier(8)
+
+    def decide_once() -> Decision:
+        barrier.wait()
+        return decider.decide(candidate("http_read"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        decisions = [future.result() for future in [pool.submit(decide_once) for _ in range(8)]]
+
+    served = [d.matched.span_id for d in decisions if d.answer == "recorded" and d.matched]
+    assert sorted(served) == ["s1", "s2"]
+    assert sum(d.answer == "live" for d in decisions) == 6
+
+
+def test_a_decision_is_written_as_wire_fields() -> None:
+    decision = Decision(
+        "http_write", "recorded", recorded("s4", "http_write"), "same name, same position", True, ()
+    )
+
+    assert describe_decision(decision) == {
+        "answered": "recorded",
+        "matched": {"span_id": "s4", "rule": "same name, same position"},
+        "changed": True,
+    }
+
+
+def test_an_unmatched_decision_is_written_with_only_its_flags() -> None:
+    assert describe_decision(FAKED_UNDESCRIBED_CALL) == {
+        "answered": "faked",
+        "flags": ["undescribed_call"],
+    }
