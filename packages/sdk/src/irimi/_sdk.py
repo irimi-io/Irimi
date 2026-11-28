@@ -82,12 +82,15 @@ class Sdk:
         is_drained = self._exporter is None or self._exporter.flush(timeout)
         return is_drained and self._drops.take_new_count() == 0
 
-    def register_workflow(self, name: str, import_path: str) -> None:
+    def register_workflow(self, workflow_id: str, import_path: str) -> None:
         with self._lock:
-            registered_path = self._workflow_import_paths.setdefault(name, import_path)
+            registered_path = self._workflow_import_paths.setdefault(workflow_id, import_path)
         if registered_path != import_path:
             logger.warning(
-                "two irimi workflows are named %r: %s and %s", name, registered_path, import_path
+                "two irimi workflows share the id %r: %s and %s; set a different id= on each",
+                workflow_id,
+                registered_path,
+                import_path,
             )
 
     def report_failure(self, action: str) -> None:
