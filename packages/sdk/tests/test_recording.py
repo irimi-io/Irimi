@@ -1,7 +1,7 @@
 import asyncio
-from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
+from struct import Struct
 from typing import Any
 
 import irimi
@@ -71,8 +71,11 @@ class TaggedMembers(set[object]):
 
 
 @dataclass(init=False)
-class TaggedSamples(array[int]):
+class TaggedLayout(Struct):
     tag: str = "urgent"
+
+    def __init__(self, layout: str) -> None:
+        super().__init__(layout)
 
 
 @dataclass
@@ -230,7 +233,7 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
         (TaggedEntries({"amount": 2}), f"{__name__}.TaggedEntries"),
         (TaggedItems([1, 2]), f"{__name__}.TaggedItems"),
         (TaggedMembers({1, 2}), f"{__name__}.TaggedMembers"),
-        (TaggedSamples("i", [1, 2]), f"{__name__}.TaggedSamples"),
+        (TaggedLayout("i"), f"{__name__}.TaggedLayout"),
         (TaggedText("refund"), f"{__name__}.TaggedText"),
         (TaggedNumber(1250), f"{__name__}.TaggedNumber"),
     ],
