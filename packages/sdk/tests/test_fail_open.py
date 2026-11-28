@@ -43,6 +43,44 @@ look_up_both()
 print(irimi.flush())
 """
 
+AIOHTTP_APP = """
+import asyncio
+import os
+import aiohttp
+import irimi
+
+@irimi.workflow
+async def look_up_both(session):
+    for path in ("/a", "/b"):
+        async with session.get(os.environ["UPSTREAM_URL"] + path) as answer:
+            print(await answer.text())
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        {setup}
+        await look_up_both(session)
+
+asyncio.run(main())
+print(irimi.flush())
+"""
+
+UNKNOWN_AIOHTTP_APP = """
+import asyncio
+import os
+import aiohttp
+import irimi
+
+aiohttp.StreamReader.read_into = lambda reader, buffer: 0
+print(irimi.init(store_url=os.environ["STORE_URL"]).unpatched)
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(os.environ["UPSTREAM_URL"] + "/a") as answer:
+            print(await answer.text())
+
+asyncio.run(main())
+"""
+
 
 def run_app(setup: str, teardown: str = "", **environment: str) -> str:
     return run_script(APP.format(setup=setup, teardown=teardown), **environment)
@@ -125,6 +163,44 @@ def test_a_call_that_could_not_be_recorded_counts_as_not_sent(fake_store: Any) -
     assert output == "ch_123\nraised unchanged\nFalse\n"
 
 
+OBJECT_THAT_CANNOT_BE_READ = """
+import logging
+import sys
+from dataclasses import dataclass, field
+
+logging.basicConfig(stream=sys.stdout)
+
+@dataclass
+class Session:
+    user: str
+    token: str = field(init=False)
+
+@irimi.workflow
+def keep(session, note):
+    return session
+
+print(keep(Session("ada"), "kept").user)
+print(irimi.flush())
+"""
+
+
+def test_an_object_whose_fields_cannot_be_read_is_recorded_by_its_type_and_still_sent(
+    fake_store: Any,
+) -> None:
+    output = run_app(
+        f"irimi.init(store_url={fake_store.url!r})", teardown=OBJECT_THAT_CANNOT_BE_READ
+    )
+
+    session = {"$irimi": "unserialisable", "type": "__main__.Session"}
+    *_, run_start, run_end = fake_store.take_events()
+
+    assert output == "ch_123\nada\nTrue\n"
+    assert run_start["input"]["args"] == [session, "kept"]
+    assert run_start["flags"] == ["not_replayable"]
+    assert (run_end["span_id"], run_end["output"]) == (run_start["span_id"], session)
+    assert run_end["flags"] == ["unserialisable_output"]
+
+
 TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER = """
 import os
 import urllib.request
@@ -204,11 +280,12 @@ def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
     assert output == "ch_123\nFalse\n"
 
 
+@pytest.mark.parametrize("app", [OUTBOUND_APP, AIOHTTP_APP])
 def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_recorded(
-    fake_store: Any, upstream: Any
+    fake_store: Any, upstream: Any, app: str
 ) -> None:
     output = run_script(
-        OUTBOUND_APP.format(setup=f"irimi.init(store_url={fake_store.url!r})"),
+        app.format(setup=f"irimi.init(store_url={fake_store.url!r})"),
         UPSTREAM_URL=upstream.url,
     )
 
@@ -226,11 +303,19 @@ def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_reco
         ("irimi.init(store_url=os.environ['UNUSED_URL'])", False),
     ],
 )
+@pytest.mark.parametrize("app", [OUTBOUND_APP, AIOHTTP_APP])
 def test_outbound_calls_reach_the_app_unchanged_whatever_the_store_does(
-    upstream: Any, unused_url: str, setup: str, is_flushed: bool
+    upstream: Any, unused_url: str, setup: str, is_flushed: bool, app: str
 ) -> None:
-    output = run_script(
-        OUTBOUND_APP.format(setup=setup), UPSTREAM_URL=upstream.url, UNUSED_URL=unused_url
-    )
+    output = run_script(app.format(setup=setup), UPSTREAM_URL=upstream.url, UNUSED_URL=unused_url)
 
     assert output == f'{{"ok": true}}\n{{"ok": true}}\n{is_flushed}\n'
+
+
+def test_an_aiohttp_irimi_does_not_know_is_left_unpatched_and_works(
+    fake_store: Any, upstream: Any
+) -> None:
+    output = run_script(UNKNOWN_AIOHTTP_APP, STORE_URL=fake_store.url, UPSTREAM_URL=upstream.url)
+
+    assert "'aiohttp'" in output.splitlines()[0]
+    assert output.splitlines()[1] == '{"ok": true}'

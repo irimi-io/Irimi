@@ -1,16 +1,114 @@
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
+from struct import Struct
 from typing import Any
 
 import irimi
 import pytest
 from irimi._wire import parse_batch
+from pydantic import BaseModel, ConfigDict
 
 TakeEvents = Callable[[], list[dict[str, Any]]]
 
 
 class Session:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class Customer:
+    id: str
+    email: str
+
+
+class Ticket(BaseModel):
+    id: str
+    tags: list[str]
+
+
+class OpenTicket(Ticket):
+    model_config = ConfigDict(extra="allow")
+    urgency: int
+
+
+@dataclass
+class Refund:
+    ticket: Ticket
+    customers: list[Customer]
+    amount: int
+    reason: object = None
+
+
+@dataclass
+class Step:
+    name: str
+    next_step: object = None
+
+
+@dataclass(init=False)
+class TaggedEntries(dict[object, object]):
+    tag: str = "urgent"
+
+    def __init__(self, entries: dict[object, object]) -> None:
+        super().__init__(entries)
+
+
+@dataclass(init=False)
+class TaggedItems(list[object]):
+    tag: str = "urgent"
+
+    def __init__(self, items: list[object]) -> None:
+        super().__init__(items)
+
+
+@dataclass(init=False)
+class TaggedMembers(set[object]):
+    tag: str = "urgent"
+
+    def __init__(self, members: set[object]) -> None:
+        super().__init__(members)
+
+
+@dataclass(init=False)
+class TaggedLayout(Struct):
+    tag: str = "urgent"
+
+    def __init__(self, layout: str) -> None:
+        super().__init__(layout)
+
+
+@dataclass
+class TaggedText(str):
+    tag: str
+
+
+@dataclass
+class TaggedNumber(int):
+    tag: int
+
+
+class ComparedByIdentity(type):
+    def __eq__(cls, other: object) -> bool:
+        return cls is other
+
+
+class Connection(metaclass=ComparedByIdentity):
+    pass
+
+
+def repeat_a_step_forever() -> Step:
+    step = Step("retry")
+    step.next_step = step
+    return step
+
+
+def as_object(type_name: str, fields: dict[str, Any]) -> dict[str, Any]:
+    return {"$irimi": "object", "type": f"{__name__}.{type_name}", "fields": fields}
+
+
+ADA = Customer(id="C-7", email="ada@example.com")
+RECORDED_ADA = as_object("Customer", {"id": "C-7", "email": "ada@example.com"})
 
 
 @irimi.function(write=True, fake={"row_id": 0})
@@ -43,6 +141,11 @@ def fail_on_ticket(ticket_id: str) -> None:
 @irimi.workflow
 def open_session(session: object) -> object:
     return session
+
+
+@irimi.workflow
+def hand_back(value: object) -> object:
+    return value
 
 
 def test_a_workflow_run_is_recorded_as_a_tree_of_start_and_end_events(
@@ -123,6 +226,16 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
         (float("nan"), "builtins.float"),
         ("cut \ud83d short", "builtins.str"),
         ({"cut \ud83d short": 1}, "builtins.dict"),
+        (Customer, "builtins.type"),
+        (Connection(), f"{__name__}.Connection"),
+        (repeat_a_step_forever(), f"{__name__}.Step"),
+        (TaggedEntries({1: 2}), f"{__name__}.TaggedEntries"),
+        (TaggedEntries({"amount": 2}), f"{__name__}.TaggedEntries"),
+        (TaggedItems([1, 2]), f"{__name__}.TaggedItems"),
+        (TaggedMembers({1, 2}), f"{__name__}.TaggedMembers"),
+        (TaggedLayout("i"), f"{__name__}.TaggedLayout"),
+        (TaggedText("refund"), f"{__name__}.TaggedText"),
+        (TaggedNumber(1250), f"{__name__}.TaggedNumber"),
     ],
 )
 def test_a_run_with_unserialisable_input_is_recorded_and_flagged(
@@ -135,6 +248,78 @@ def test_a_run_with_unserialisable_input_is_recorded_and_flagged(
     assert run_start["flags"] == ["not_replayable"]
     assert run_end["flags"] == ["unserialisable_output"]
     assert run_end["output"] == {"$irimi": "unserialisable", "type": type_name}
+
+
+@pytest.mark.parametrize(
+    ("value", "recorded"),
+    [
+        (ADA, RECORDED_ADA),
+        (
+            Ticket(id="T-1042", tags=["billing"]),
+            as_object("Ticket", {"id": "T-1042", "tags": ["billing"]}),
+        ),
+        (
+            Refund(
+                ticket=OpenTicket.model_validate(
+                    {"id": "T-1042", "tags": [], "urgency": 2, "note": "call back"}
+                ),
+                customers=[ADA],
+                amount=1250,
+            ),
+            as_object(
+                "Refund",
+                {
+                    "ticket": as_object(
+                        "OpenTicket",
+                        {"id": "T-1042", "tags": [], "urgency": 2, "note": "call back"},
+                    ),
+                    "customers": [RECORDED_ADA],
+                    "amount": 1250,
+                    "reason": None,
+                },
+            ),
+        ),
+        (
+            OpenTicket.model_validate({"id": "T-1042", "tags": [], "urgency": 2, "$irimi": "kept"}),
+            as_object(
+                "OpenTicket",
+                {
+                    "$irimi": "literal",
+                    "value": {"id": "T-1042", "tags": [], "urgency": 2, "$irimi": "kept"},
+                },
+            ),
+        ),
+    ],
+)
+def test_a_dataclass_or_pydantic_model_is_recorded_as_its_fields(
+    recorded_events: TakeEvents, value: object, recorded: dict[str, Any]
+) -> None:
+    assert hand_back(value) is value
+
+    run_start, run_end = recorded_events()
+
+    assert parse_batch({"events": [run_start, run_end]}).refused == ()
+    assert run_start["input"] == {"args": [recorded], "kwargs": {}}
+    assert run_end["output"] == recorded
+    assert "flags" not in run_start
+    assert "flags" not in run_end
+
+
+def test_an_unserialisable_field_is_marked_in_place_and_the_run_is_flagged(
+    recorded_events: TakeEvents,
+) -> None:
+    hand_back(Refund(ticket=Ticket(id="T-1", tags=[]), customers=[], amount=5, reason=Session()))
+
+    run_start, run_end = recorded_events()
+
+    assert run_end["output"]["type"] == f"{__name__}.Refund"
+    assert run_end["output"]["fields"]["amount"] == 5
+    assert run_end["output"]["fields"]["reason"] == {
+        "$irimi": "unserialisable",
+        "type": f"{__name__}.Session",
+    }
+    assert run_start["flags"] == ["not_replayable"]
+    assert run_end["flags"] == ["unserialisable_output"]
 
 
 def test_a_labeled_function_outside_a_workflow_is_recorded_as_unattached(

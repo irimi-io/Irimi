@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import Literal
 
+from irimi._aiohttp_patch import patch_aiohttp
 from irimi._httpx_patch import patch_httpx
 from irimi._interception import Interception
 
@@ -18,7 +19,7 @@ LIBRARY_PATCHES: dict[str, Patch | None] = {
     "httpx": patch_httpx,
     "httpx2": patch_httpx,
     "urllib3": None,
-    "aiohttp": None,
+    "aiohttp": patch_aiohttp,
 }
 UNPATCHED_WARNING = "irimi could not patch %s, so calls made through it are not recorded"
 

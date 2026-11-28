@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import functools
 import inspect
-import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import ModuleType
 from typing import Any
 
-from irimi._bodies import BodyCopy, CopiedBody
 from irimi._interception import Interception, OpenCall
-from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundResponse
+from irimi._outbound_calls import Headers, OutboundCall, OutboundResponse
+from irimi._response_recording import ResponseRecording, end_without_response
 
 TRANSPORT_METHODS = (
     "HTTPTransport.handle_request",
@@ -36,56 +35,6 @@ def patch_httpx(library: ModuleType, interception: Interception) -> bool:
     return True
 
 
-class _ResponseRecording:
-    def __init__(
-        self, interception: Interception, open_call: OpenCall, response: OutboundResponse
-    ) -> None:
-        self._interception = interception
-        self._open_call = open_call
-        self._response = response
-        self._body: BodyCopy | None = BodyCopy() if open_call.is_attached else None
-        self._has_copy_failed = False
-        self._is_ended = False
-        self._end_lock = threading.Lock()
-
-    def add(self, chunk: bytes) -> None:
-        body_copy = self._body
-        if body_copy is None:
-            return
-        try:
-            body_copy.add(chunk)
-        except Exception:
-            self._body = None
-            self._has_copy_failed = True
-            self._interception.report_failure("copy an outbound response body")
-
-    def end(self, was_read_to_end: bool, error: BaseException | None) -> None:
-        if not self._claim_end():
-            return
-        try:
-            outcome = CallOutcome(
-                response=self._response,
-                body=self._release_body(),
-                was_read_to_end=was_read_to_end and not self._has_copy_failed,
-                error=error,
-            )
-        except Exception:
-            self._interception.report_failure("take the copy of an outbound response body")
-            return
-        self._interception.end(self._open_call, outcome)
-
-    def _release_body(self) -> CopiedBody | None:
-        body_copy, self._body = self._body, None
-        return body_copy.take() if body_copy is not None else None
-
-    def _claim_end(self) -> bool:
-        with self._end_lock:
-            if self._is_ended:
-                return False
-            self._is_ended = True
-            return True
-
-
 def _wrap_sync_transport(
     library: ModuleType, interception: Interception
 ) -> Callable[[object, Any], Any]:
@@ -102,7 +51,7 @@ def _wrap_sync_transport(
         try:
             response = send_request(transport, request)
         except BaseException as error:
-            _end_without_response(interception, open_call, error)
+            end_without_response(interception, open_call, error)
             raise
         _record_response(interception, open_call, response, stream_class)
         return response
@@ -130,7 +79,7 @@ def _wrap_async_transport(
         try:
             response = await send_request(transport, request)
         except BaseException as error:
-            _end_without_response(interception, open_call, error)
+            end_without_response(interception, open_call, error)
             raise
         _record_response(interception, open_call, response, stream_class)
         return response
@@ -147,20 +96,13 @@ def _begin_call(interception: Interception, request: Any, library: ModuleType) -
     return interception.begin(call)
 
 
-def _end_without_response(
-    interception: Interception, open_call: OpenCall | None, error: BaseException
-) -> None:
-    outcome = CallOutcome(response=None, body=None, was_read_to_end=False, error=error)
-    interception.end(open_call, outcome)
-
-
 def _record_response(
     interception: Interception, open_call: OpenCall | None, response: Any, stream_class: type
 ) -> None:
     if open_call is None:
         return
     try:
-        recording = _ResponseRecording(interception, open_call, _translate_response(response))
+        recording = ResponseRecording(interception, open_call, _translate_response(response))
         response.stream = stream_class(response.stream, recording)
     except Exception:
         interception.report_failure("record an outbound response")
@@ -200,7 +142,7 @@ def _decode_headers(raw_headers: Any) -> Headers:
     return tuple((name.decode("latin-1"), value.decode("latin-1")) for name, value in raw_headers)
 
 
-def _hold_stream(stream: Any, inner_stream: Any, recording: _ResponseRecording) -> None:
+def _hold_stream(stream: Any, inner_stream: Any, recording: ResponseRecording) -> None:
     stream.inner_stream = inner_stream
     stream.recording = recording
 
