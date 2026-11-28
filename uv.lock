@@ -17,7 +17,7 @@ members = [
 dev = [
     { name = "aiohttp", specifier = ">=3.14.5" },
     { name = "httpx", specifier = ">=0.29.0" },
-    { name = "httpx2", specifier = ">=2.16.2" },
+    { name = "httpx2", specifier = ">=2.14.0" },
     { name = "irimi", editable = "packages/sdk" },
     { name = "irimi-cli", editable = "packages/cli" },
     { name = "irimi-store", editable = "packages/store" },
@@ -25,6 +25,12 @@ dev = [
     { name = "pytest", specifier = ">=8.4" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "ruff", specifier = ">=0.14" },
+]
+http-clients = [
+    { name = "aiohttp", specifier = ">=3.14.5" },
+    { name = "httpx", specifier = ">=0.29.0" },
+    { name = "httpx2", specifier = ">=2.14.0" },
+    { name = "requests", specifier = ">=2.34.2" },
 ]
 
 [[package]]
