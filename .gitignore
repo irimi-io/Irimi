@@ -222,5 +222,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Superpowers working documents
+# Planning and review working documents
 docs/superpowers/
+egm_context/
+*_report.md
