@@ -8,6 +8,7 @@ from pathlib import Path
 from irimi._wire import JsonValue
 
 from irimi_store.flags import read_flags
+from irimi_store.stored_fields import split_fields
 
 CREATE_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS events (
@@ -42,9 +43,62 @@ WHERE type = 'start' AND parent_span_id IS NULL
 """
 CREATE_SPANS_INDEX = "CREATE INDEX events_spans ON events (project, trace_id, span_id, type)"
 CREATE_RUNS_INDEX = "CREATE INDEX events_runs ON events (project, trace_id)"
+HOLD_EVENTS_WITH_DATA = "ALTER TABLE events RENAME TO events_holding_data"
+CREATE_EVENTS_TABLE_WITHOUT_DATA = """
+CREATE TABLE events (
+    arrival INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    span_id TEXT NOT NULL,
+    time_unix_nano INTEGER NOT NULL,
+    parent_span_id TEXT,
+    kind TEXT,
+    name TEXT,
+    seq INTEGER,
+    status TEXT,
+    flags TEXT,
+    environment TEXT,
+    mode TEXT,
+    events_produced TEXT,
+    data_size INTEGER NOT NULL,
+    created_at_unix_nano INTEGER NOT NULL,
+    unattached INTEGER NOT NULL,
+    UNIQUE (project, trace_id, id)
+)
+"""
+CREATE_EVENT_DATA_TABLE = """
+CREATE TABLE event_data (
+    arrival INTEGER PRIMARY KEY,
+    data TEXT NOT NULL
+)
+"""
+SELECT_NEXT_EVENT_HOLDING_DATA = """
+SELECT
+    arrival, project, trace_id, id, type, span_id, time_unix_nano,
+    parent_span_id, kind, name, seq, data, created_at_unix_nano, unattached
+FROM events_holding_data WHERE arrival > ? ORDER BY arrival LIMIT 1
+"""
+INSERT_EVENT_WITHOUT_DATA = """
+INSERT INTO events (
+    arrival, project, trace_id, id, type, span_id, time_unix_nano,
+    parent_span_id, kind, name, seq,
+    status, flags, environment, mode, events_produced,
+    data_size, created_at_unix_nano, unattached
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+INSERT_EVENT_DATA = "INSERT INTO event_data (arrival, data) VALUES (?, ?)"
+DROP_EVENTS_HOLDING_DATA = "DROP TABLE events_holding_data"
+FIELDS_GIVEN_A_COLUMN = ("status", "flags", "environment", "mode", "events_produced")
 UNATTACHED = "unattached"
 SECONDS_TO_WAIT_FOR_ANOTHER_OPENER = 30.0
 SECONDS_BETWEEN_TRIES = 0.05
+
+
+EventHoldingData = tuple[
+    int, str, str, str, str, str, int, str | None, str | None, str | None, int | None, str, int, int
+]
 
 
 class NewerSchemaError(Exception):
@@ -121,7 +175,42 @@ def _tell_unattached_roots_apart(connection: sqlite3.Connection) -> None:
     connection.execute(CREATE_RUNS_INDEX)
 
 
+def _keep_data_apart(connection: sqlite3.Connection) -> None:
+    connection.execute(HOLD_EVENTS_WITH_DATA)
+    connection.execute(CREATE_EVENTS_TABLE_WITHOUT_DATA)
+    connection.execute(CREATE_EVENT_DATA_TABLE)
+    last_arrival = 0
+    while (row := _read_next_event_holding_data(connection, last_arrival)) is not None:
+        last_arrival = _write_event_apart_from_its_data(connection, row)
+    connection.execute(DROP_EVENTS_HOLDING_DATA)
+    connection.execute(CREATE_ROOTS_INDEX)
+    connection.execute(CREATE_RUN_ROOTS_INDEX)
+    connection.execute(CREATE_SPANS_INDEX)
+    connection.execute(CREATE_RUNS_INDEX)
+
+
+def _read_next_event_holding_data(
+    connection: sqlite3.Connection, last_arrival: int
+) -> EventHoldingData | None:
+    row: EventHoldingData | None = connection.execute(
+        SELECT_NEXT_EVENT_HOLDING_DATA, (last_arrival,)
+    ).fetchone()
+    return row
+
+
+def _write_event_apart_from_its_data(connection: sqlite3.Connection, row: EventHoldingData) -> int:
+    arrival, data, created_at_unix_nano, unattached = row[0], row[11], row[12], row[13]
+    stored = split_fields(json.loads(data), FIELDS_GIVEN_A_COLUMN)
+    connection.execute(
+        INSERT_EVENT_WITHOUT_DATA,
+        (*row[:11], *stored.core, len(stored.data), created_at_unix_nano, unattached),
+    )
+    connection.execute(INSERT_EVENT_DATA, (arrival, stored.data))
+    return arrival
+
+
 SCHEMA_STEPS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _create_events_table,
     _tell_unattached_roots_apart,
+    _keep_data_apart,
 )

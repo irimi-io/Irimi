@@ -24,6 +24,14 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
+      - name: Working documents stay out of the repo
+        run: |
+          tracked=$(git ls-files -- docs/superpowers egm_context '*_report.md')
+          if [ -n "$tracked" ]; then
+            echo "::error::Planning and review documents stay local. Untrack each with: git rm --cached <path>"
+            echo "$tracked"
+            exit 1
+          fi
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run ruff format --check
@@ -50,5 +58,5 @@ jobs:
       - run: '"$RUNNER_TEMP/venv/bin/python" -c "import irimi"'
       - if: hashFiles('packages/sdk/tests/**/test_*.py') != ''
         run: |
-          "$RUNNER_TEMP/venv/bin/pip" install pytest --group http-clients
+          "$RUNNER_TEMP/venv/bin/pip" install pytest --group http-clients --group model-libraries
           "$RUNNER_TEMP/venv/bin/python" -m pytest packages/sdk/tests

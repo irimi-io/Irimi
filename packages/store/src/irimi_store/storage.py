@@ -3,10 +3,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from irimi._wire import EndEvent, Event, StartEvent
+from irimi._wire.field_names import ENVIRONMENT, EVENTS_PRODUCED, FLAGS, MODE, STATUS
 
 from irimi_store.pages import Page
 
 DEFAULT_PROJECT = "default"
+CORE_FIELD_NAMES: tuple[str, ...] = (STATUS, FLAGS, ENVIRONMENT, MODE, EVENTS_PRODUCED)
 
 RootSet = Literal["runs", "unattached_calls"]
 
@@ -26,8 +28,10 @@ class StorageEngine(Protocol):
     def add_events(self, project: str, events: Sequence[Event]) -> None: ...
 
     def read_run_events(
-        self, project: str, trace_id: str, cursor: str | None, limit: int
+        self, project: str, trace_id: str, cursor: str | None, limit: int, size_limit: int
     ) -> Page[Event]: ...
+
+    def read_run_core_events(self, project: str, trace_id: str) -> tuple[Event, ...]: ...
 
     def read_call_events(self, project: str, trace_id: str, span_id: str) -> tuple[Event, ...]: ...
 
