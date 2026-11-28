@@ -30,6 +30,8 @@ CONTENT_ENCODING = "content_encoding"
 METHOD = "method"
 URL = "url"
 HEADERS = "headers"
+SPAN_ID = "span_id"
+RULE = "rule"
 
 Flag = Literal[
     "not_replayable",
@@ -51,6 +53,10 @@ NOT_REPLAYABLE: Flag = "not_replayable"
 UNSERIALISABLE_OUTPUT: Flag = "unserialisable_output"
 RESPONSE_BODY_TRUNCATED: Flag = "response_body_truncated"
 RESPONSE_BODY_INCOMPLETE: Flag = "response_body_incomplete"
+UNDESCRIBED_CALL: Flag = "undescribed_call"
+UNMATCHED_READ: Flag = "unmatched_read"
+NEW_WRITE: Flag = "new_write"
+RECORDED_VALUE_UNSERVABLE: Flag = "recorded_value_unservable"
 
 
 def write_flags(*flags: Flag) -> list[JsonValue]:

@@ -423,3 +423,27 @@ def test_an_unmatched_decision_is_written_with_only_its_flags() -> None:
         "answered": "faked",
         "flags": ["undescribed_call"],
     }
+
+
+def test_an_unmatched_read_leaves_the_recording_unclaimed() -> None:
+    decider = ReplayDecider((recorded("s1", "http_read", key="charge"),))
+
+    first = decider.decide(candidate("http_read", "other"))
+    second = decider.decide(candidate("http_read", "charge"))
+
+    assert first.answer == "live"
+    assert second.answer == "recorded"
+    assert second.matched is not None
+    assert second.matched.span_id == "s1"
+
+
+def test_a_claimed_recorded_write_is_not_paired_again() -> None:
+    decider = ReplayDecider((recorded("s1", "http_write"),))
+
+    first = decider.decide(candidate("http_write"))
+    second = decider.decide(candidate("http_write"))
+
+    assert first.answer == "recorded"
+    assert second.answer == "faked"
+    assert second.matched is None
+    assert second.flags == ("new_write",)
