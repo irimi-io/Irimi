@@ -1,4 +1,3 @@
-from irimi._wire import Event
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.routing import Route
@@ -24,7 +23,6 @@ from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, RootSet, StorageE
 ACCEPTED_READER_API_VERSIONS = (READER_API_VERSION,)
 DEFAULT_LIST_PAGE_LIMIT = 50
 LARGEST_LIST_PAGE_LIMIT = 200
-ASSEMBLY_PAGE_LIMIT = 1000
 
 
 def create_reader_routes(storage: StorageEngine) -> list[Route]:
@@ -47,7 +45,7 @@ def create_reader_routes(storage: StorageEngine) -> list[Route]:
 
     async def read_run(request: Request) -> JsonAnswer:
         trace_id: str = request.path_params["trace_id"]
-        events = await run_in_threadpool(_read_every_run_event, storage, trace_id)
+        events = await run_in_threadpool(storage.read_run_core_events, DEFAULT_PROJECT, trace_id)
         if not events:
             raise NotHeldError(f"no run with id {trace_id}")
         return JsonAnswer(write_run(assemble_run(trace_id, events)))
@@ -70,17 +68,6 @@ def create_reader_routes(storage: StorageEngine) -> list[Route]:
         Route(UNATTACHED_CALLS_PATH, list_unattached_calls, methods=["GET"]),
         Route("/api/{version}/{rest:path}", refuse_unknown_reader_api_path, methods=["GET"]),
     ]
-
-
-def _read_every_run_event(storage: StorageEngine, trace_id: str) -> tuple[Event, ...]:
-    events: list[Event] = []
-    cursor: str | None = None
-    while True:
-        page = storage.read_run_events(DEFAULT_PROJECT, trace_id, cursor, ASSEMBLY_PAGE_LIMIT)
-        events.extend(page.items)
-        cursor = page.next_cursor
-        if cursor is None:
-            return tuple(events)
 
 
 async def refuse_unknown_reader_api_path(request: Request) -> JsonAnswer:

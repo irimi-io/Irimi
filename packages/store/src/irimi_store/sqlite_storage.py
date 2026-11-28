@@ -20,22 +20,26 @@ INSERT OR IGNORE INTO events (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {", ".join("?" for _ in CORE_FIELD_NAMES)}, ?, ?, ?)
 """
 INSERT_EVENT_DATA = "INSERT INTO event_data (arrival, data) VALUES (?, ?)"
-EVENT_COLUMNS = f"""
+CORE_EVENT_COLUMNS = f"""
     id, type, trace_id, span_id, time_unix_nano, parent_span_id, kind, name, seq,
-    {CORE_FIELD_COLUMNS}, data
+    {CORE_FIELD_COLUMNS}
 """
+EVENT_COLUMNS = f"{CORE_EVENT_COLUMNS}, data"
 EVENTS_WITH_DATA = "events JOIN event_data USING (arrival)"
 SELECT_RUN_EVENTS = f"""
 SELECT {EVENT_COLUMNS}, arrival FROM {EVENTS_WITH_DATA}
 WHERE project = ? AND trace_id = ? AND arrival > ? ORDER BY arrival LIMIT ?
 """
+SELECT_RUN_CORE_EVENTS = f"""
+SELECT {CORE_EVENT_COLUMNS} FROM events WHERE project = ? AND trace_id = ? ORDER BY arrival
+"""
 SELECT_ROOTS = f"""
-SELECT {EVENT_COLUMNS}, arrival, (
+SELECT {CORE_EVENT_COLUMNS}, arrival, (
     SELECT COUNT(*) FROM events held
     WHERE held.project = events.project AND held.trace_id = events.trace_id
         AND held.type IN ('start', 'end')
 )
-FROM {EVENTS_WITH_DATA}
+FROM events
 WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NULL
     AND arrival < ?
     AND NOT EXISTS (
@@ -51,10 +55,26 @@ SELECT {EVENT_COLUMNS} FROM {EVENTS_WITH_DATA}
 WHERE project = ? AND trace_id = ? AND span_id = ? ORDER BY arrival
 """
 SELECT_SPAN_END = f"""
-SELECT {EVENT_COLUMNS} FROM {EVENTS_WITH_DATA}
+SELECT {CORE_EVENT_COLUMNS} FROM events
 WHERE project = ? AND trace_id = ? AND span_id = ? AND type = 'end' ORDER BY arrival LIMIT 1
 """
 
+CoreEventRow = tuple[
+    str,
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]
 EventRow = tuple[
     str,
     str,
@@ -105,10 +125,10 @@ RootRow = tuple[
     str | None,
     str | None,
     str | None,
-    str,
     int,
     int,
 ]
+EventColumns = tuple[str, str, str, str, int, str | None, str | None, str | None, int | None]
 StartColumns = tuple[str | None, str | None, str | None, int | None]
 
 
@@ -139,6 +159,13 @@ class SqliteStorageEngine:
             next_cursor=str(shown[-1][15]) if len(rows) > limit else None,
         )
 
+    def read_run_core_events(self, project: str, trace_id: str) -> tuple[Event, ...]:
+        with self._open_connection() as connection:
+            rows: list[CoreEventRow] = connection.execute(
+                SELECT_RUN_CORE_EVENTS, (project, trace_id)
+            ).fetchall()
+        return tuple(_read_core_event(row) for row in rows)
+
     def read_call_events(self, project: str, trace_id: str, span_id: str) -> tuple[Event, ...]:
         with self._open_connection() as connection:
             rows: list[EventRow] = connection.execute(
@@ -158,7 +185,7 @@ class SqliteStorageEngine:
             roots = tuple(_read_root(connection, project, row) for row in shown)
         return Page(
             items=roots,
-            next_cursor=str(shown[-1][15]) if len(rows) > limit else None,
+            next_cursor=str(shown[-1][14]) if len(rows) > limit else None,
         )
 
     @contextmanager
@@ -179,14 +206,14 @@ def _read_arrival_cursor(cursor: str | None, arrival_on_the_first_page: int) -> 
 
 
 def _read_root(connection: sqlite3.Connection, project: str, row: RootRow) -> StoredRoot:
-    start = _read_event(row[:15])
-    end_row: EventRow | None = connection.execute(
+    start = _read_core_event(row[:14])
+    end_row: CoreEventRow | None = connection.execute(
         SELECT_SPAN_END, (project, start.trace_id, start.span_id)
     ).fetchone()
-    end = None if end_row is None else _read_event(end_row)
+    end = None if end_row is None else _read_core_event(end_row)
     if not isinstance(start, StartEvent) or not isinstance(end, EndEvent | None):
         raise TypeError(f"stored root {start.trace_id} is not a start with an end")
-    return StoredRoot(start=start, end=end, events_held=row[16])
+    return StoredRoot(start=start, end=end, events_held=row[15])
 
 
 def _add_event(
@@ -223,19 +250,19 @@ def _write_start_columns(event: Event) -> StartColumns:
 
 
 def _read_event(row: EventRow) -> Event:
-    (
-        event_id,
-        event_type,
-        trace_id,
-        span_id,
-        time_unix_nano,
-        parent_span_id,
-        kind,
-        name,
-        seq,
-    ) = row[:9]
+    return _build_event(row[:9], StoredFields(core=row[9:14], data=row[14]))
+
+
+def _read_core_event(row: CoreEventRow) -> Event:
+    return _build_event(row[:9], StoredFields(core=row[9:], data="{}"))
+
+
+def _build_event(columns: EventColumns, stored_fields: StoredFields) -> Event:
+    event_id, event_type, trace_id, span_id, time_unix_nano, parent_span_id, kind, name, seq = (
+        columns
+    )
     document: dict[str, JsonValue] = {
-        **join_fields(StoredFields(core=row[9:14], data=row[14]), CORE_FIELD_NAMES),
+        **join_fields(stored_fields, CORE_FIELD_NAMES),
         "id": event_id,
         "type": event_type,
         "trace_id": trace_id,
