@@ -14,6 +14,7 @@ class CallLabel:
     kind: Literal["workflow", "function"]
     name: str
     import_path: str
+    key: str | None = None
     is_write: bool = False
     is_read: bool = False
 
@@ -69,6 +70,8 @@ def _describe_root(
         field_names.STARTED_BY: {"kind": "decorated_function", "import_path": label.import_path},
         field_names.DEPLOYMENT: deployment,
     }
+    if label.key is not None:
+        fields[field_names.KEY] = label.key
     if settings.environment is not None:
         fields[field_names.ENVIRONMENT] = settings.environment
     if not is_input_complete:

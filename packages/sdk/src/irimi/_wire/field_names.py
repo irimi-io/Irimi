@@ -20,6 +20,7 @@ NEXT_CURSOR = "next_cursor"
 REQUEST = "request"
 RESPONSE = "response"
 ANSWERED = "answered"
+KEY = "key"
 
 Flag = Literal[
     "not_replayable",

@@ -133,6 +133,11 @@ async def triage_ticket(ticket_id: str) -> list[str]:
     return list(await asyncio.gather(look_up_charge(ticket_id), look_up_charge(ticket_id)))
 
 
+@irimi.workflow(id="a3f9")
+def close_ticket(ticket_id: str) -> str:
+    return "closed"
+
+
 @irimi.workflow
 def fail_on_ticket(ticket_id: str) -> None:
     raise LookupError(f"no ticket {ticket_id}")
@@ -207,6 +212,39 @@ def test_an_async_workflow_keeps_concurrent_steps_under_their_run(
     assert sorted(step["seq"] for step in step_starts) == [1, 2]
     assert {step["parent_span_id"] for step in step_starts} == {run_start["span_id"]}
     assert events[-1]["events_produced"] == 6
+
+
+def test_a_workflow_records_the_id_the_user_set_beside_its_name(
+    recorded_events: TakeEvents,
+) -> None:
+    close_ticket("T-1042")
+    handle_ticket({"id": "T-1042"})
+
+    starts = {
+        event["name"]: event for event in recorded_events() if event.get("kind") == "workflow"
+    }
+
+    assert starts["close_ticket"]["key"] == "a3f9"
+    assert "key" not in starts["handle_ticket"]
+
+
+def test_workflows_that_share_an_id_or_a_name_are_told_to_set_an_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def summarise() -> None:
+        return None
+
+    def archive() -> None:
+        return None
+
+    irimi.workflow(name="tickets.summarise")(summarise)
+    irimi.workflow(name="tickets.summarise")(archive)
+    irimi.workflow(name="tickets.summarise", id="7c1d")(archive)
+    assert [record.getMessage() for record in caplog.records] == [
+        "two irimi workflows share the id 'tickets.summarise': "
+        f"{__name__}:{summarise.__qualname__} and {__name__}:{archive.__qualname__}; "
+        "set a different id= on each"
+    ]
 
 
 def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEvents) -> None:

@@ -17,8 +17,10 @@ Outcome = TypeVar("Outcome")
 @overload
 def workflow(fn: DecoratedFunction, /) -> DecoratedFunction: ...
 @overload
-def workflow(*, name: str | None = None) -> Callable[[DecoratedFunction], DecoratedFunction]: ...
-def workflow(fn: Any = None, *, name: str | None = None) -> Any:
+def workflow(
+    *, name: str | None = None, id: str | None = None
+) -> Callable[[DecoratedFunction], DecoratedFunction]: ...
+def workflow(fn: Any = None, *, name: str | None = None, id: str | None = None) -> Any:
     """Mark a function as a workflow: each call is recorded as one run.
 
     The function keeps its signature and behaviour, sync or async. Its arguments, its return
@@ -26,14 +28,19 @@ def workflow(fn: Any = None, *, name: str | None = None) -> Any:
     called inside another workflow is a step of the outer run. Without `irimi.init` it does
     nothing.
 
-    `name` identifies the workflow and defaults to the function's name.
+    `name` is what the workflow is shown as and defaults to the function's name. `id` identifies
+    the workflow across renames; without one the name identifies it. Two workflows must not
+    share an id, or a name when neither sets an id.
     """
 
     def decorate(function: DecoratedFunction) -> DecoratedFunction:
         label = CallLabel(
-            kind="workflow", name=name or function.__name__, import_path=_import_path(function)
+            kind="workflow",
+            name=name or function.__name__,
+            import_path=_import_path(function),
+            key=id,
         )
-        SDK.register_workflow(label.name, label.import_path)
+        SDK.register_workflow(label.name if label.key is None else label.key, label.import_path)
         return _record_calls(function, label)
 
     return decorate if fn is None else decorate(fn)
