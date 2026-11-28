@@ -20,6 +20,9 @@ NEXT_CURSOR = "next_cursor"
 REQUEST = "request"
 RESPONSE = "response"
 ANSWERED = "answered"
+REPLAY = "replay"
+MATCHED = "matched"
+CHANGED = "changed"
 
 Flag = Literal[
     "not_replayable",
@@ -29,6 +32,12 @@ Flag = Literal[
     "response_body_truncated",
     "request_body_not_recorded",
     "response_body_incomplete",
+    "new_write",
+    "unmatched_read",
+    "undescribed_call",
+    "recorded_value_unservable",
+    "caught_by_proxy",
+    "after_divergence",
 ]
 
 
