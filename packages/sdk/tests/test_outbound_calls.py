@@ -123,6 +123,23 @@ def test_a_call_outside_any_workflow_is_recorded_as_unattached_without_bodies(
     assert logs_end["flags"] == ["response_body_incomplete"]
 
 
+def test_a_call_inside_a_function_outside_any_workflow_is_recorded_without_bodies(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    @irimi.function
+    def report_metrics() -> None:
+        http_library.post(f"{upstream.url}/v1/metrics", json={"cpu": 0.4})
+
+    report_metrics()
+
+    function_start, call_start, call_end, _ = recorded_events()
+
+    assert call_start["parent_span_id"] == function_start["span_id"]
+    assert call_start["flags"] == ["unattached"]
+    assert "body" not in call_start["request"]
+    assert "body" not in call_end["response"]
+
+
 @pytest.mark.parametrize(
     "name",
     [

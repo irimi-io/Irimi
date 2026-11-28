@@ -26,7 +26,8 @@ class Interception:
 
     def begin(self, call: OutboundCall) -> OpenCall | None:
         try:
-            is_attached = self._recorder.find_current_call() is not None
+            current_call = self._recorder.find_current_call()
+            is_attached = current_call is not None and current_call.run.is_workflow
             payload = describe_request(call, is_attached)
             active_call = self._recorder.begin_detached_call("http", name_http_call(call), payload)
         except Exception:
