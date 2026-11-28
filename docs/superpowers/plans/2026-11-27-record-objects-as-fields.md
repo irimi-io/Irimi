@@ -413,7 +413,7 @@ The four cases cover: a frozen `slots` dataclass; a Pydantic model; a dataclass 
 
 Add two cases to the parameters of the existing `test_a_run_with_unserialisable_input_is_recorded_and_flagged`:
 
-```python
+```text
         (Customer, "builtins.type"),
         (repeat_a_step_forever(), f"{__name__}.Step"),
 ```
