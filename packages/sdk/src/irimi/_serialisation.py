@@ -8,6 +8,8 @@ from irimi._object_fields import read_fields
 from irimi._wire import JsonValue, escape_reserved_key, mark_object, mark_unserialisable
 
 SIZE_OF_A_SMALL_VALUE = 8
+PLAIN_BASE_TYPES = (str, int, float, list, tuple, dict)
+PLAIN_TYPES = frozenset({*PLAIN_BASE_TYPES, bool, type(None)})
 
 
 @dataclass(frozen=True)
@@ -15,7 +17,6 @@ class Serialised:
     value: JsonValue
     is_complete: bool
     approximate_size: int
-    unread_objects: int
 
 
 def serialise(value: object) -> Serialised:
@@ -24,14 +25,9 @@ def serialise(value: object) -> Serialised:
         taken = snapshot.take(value)
     except RecursionError:
         return Serialised(
-            mark_unserialisable(name_type(type(value))),
-            is_complete=False,
-            approximate_size=0,
-            unread_objects=0,
+            mark_unserialisable(name_type(type(value))), is_complete=False, approximate_size=0
         )
-    return Serialised(
-        taken, snapshot.is_complete, snapshot.approximate_size, snapshot.unread_objects
-    )
+    return Serialised(taken, snapshot.is_complete, snapshot.approximate_size)
 
 
 def serialise_arguments(
@@ -62,15 +58,23 @@ class _Snapshot:
     def __init__(self) -> None:
         self.is_complete = True
         self.approximate_size = 0
-        self.unread_objects = 0
 
     def take(self, value: object) -> JsonValue:
+        if type(value) not in PLAIN_TYPES:
+            try:
+                fields = read_fields(value)
+            except RecursionError:
+                raise
+            except Exception:
+                return self._record_by_type(value)
+            if fields is not None:
+                return self._take_fields(value, fields)
         if isinstance(value, str):
             if not _is_whole_text(value):
                 return self._record_by_type(value)
             self.approximate_size += len(value)
             return value
-        if value is None or isinstance(value, (bool, int)):
+        if value is None or isinstance(value, int):
             return value
         if isinstance(value, float):
             return value if math.isfinite(value) else self._record_by_type(value)
@@ -79,17 +83,10 @@ class _Snapshot:
             return [self.take(item) for item in value]
         if isinstance(value, dict) and _has_whole_names(value):
             return self._take_object(value)
-        return self._take_fields(value)
+        return self._record_by_type(value)
 
-    def _take_fields(self, value: object) -> JsonValue:
-        try:
-            fields = read_fields(value)
-        except RecursionError:
-            raise
-        except Exception:
-            self.unread_objects += 1
-            return self._record_by_type(value)
-        if fields is None or not _has_whole_names(fields):
+    def _take_fields(self, value: object, fields: dict[str, object]) -> JsonValue:
+        if isinstance(value, PLAIN_BASE_TYPES) or not _has_whole_names(fields):
             return self._record_by_type(value)
         type_name = name_type(type(value))
         self.approximate_size += len(type_name) + SIZE_OF_A_SMALL_VALUE

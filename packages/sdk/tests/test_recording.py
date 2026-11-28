@@ -45,6 +45,26 @@ class Step:
     next_step: object = None
 
 
+@dataclass(init=False)
+class TaggedEntries(dict[object, object]):
+    tag: str = "urgent"
+
+
+@dataclass(init=False)
+class TaggedItems(list[object]):
+    tag: str = "urgent"
+
+
+@dataclass(init=False)
+class TaggedText(str):
+    tag: str = "urgent"
+
+
+@dataclass(init=False)
+class TaggedNumber(int):
+    tag: str = "urgent"
+
+
 def repeat_a_step_forever() -> Step:
     step = Step("retry")
     step.next_step = step
@@ -176,6 +196,11 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
         ({"cut \ud83d short": 1}, "builtins.dict"),
         (Customer, "builtins.type"),
         (repeat_a_step_forever(), f"{__name__}.Step"),
+        (TaggedEntries({1: 2}), f"{__name__}.TaggedEntries"),
+        (TaggedEntries({"amount": 2}), f"{__name__}.TaggedEntries"),
+        (TaggedItems([1, 2]), f"{__name__}.TaggedItems"),
+        (TaggedText("refund"), f"{__name__}.TaggedText"),
+        (TaggedNumber(1250), f"{__name__}.TaggedNumber"),
     ],
 )
 def test_a_run_with_unserialisable_input_is_recorded_and_flagged(

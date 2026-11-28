@@ -4,7 +4,7 @@
 
 **Goal:** A dataclass instance or a Pydantic model passed to, or returned from, a decorated call is recorded as its fields under the marker `{"$irimi": "object", "type": "...", "fields": {...}}`, so a workflow written as `handle_ticket(ticket: Ticket)` is no longer flagged `not_replayable`.
 
-**Architecture:** The serialisation pass (`irimi._serialisation`) already walks a value and replaces what it cannot keep with a marker. One new pure function, `read_fields`, says whether a value is an object with fields and reads them one level deep. The pass calls it only for a value it would otherwise record by its type, then walks the fields like any other object. A read that raises is contained in the pass, counted, and reported through the SDK's existing drop count.
+**Architecture:** The serialisation pass (`irimi._serialisation`) already walks a value and replaces what it cannot keep with a marker. One new pure function, `read_fields`, says whether a value is an object with fields and reads them one level deep. The pass calls it for every value that is not exactly a plain type, then walks the fields like any other object. A read that raises is contained in the pass: the object is recorded by its type and flagged, and nothing is counted as dropped.
 
 **Tech Stack:** Python 3.10+ (SDK), standard library only in the SDK. `pydantic` as a development dependency of the workspace.
 
@@ -19,7 +19,7 @@
 | Point | Task | To reverse |
 | --- | --- | --- |
 | 1 Pydantic fields read from `model_fields` and `model_extra`, not `model_dump()` | 1 | `read_fields` in `_object_fields.py` |
-| 2 A failed read is counted, so the next `flush()` returns `False` | 2 | `Payload.unread_objects` and `Sdk.report_unread_objects` |
+| 2 A dataclass that subclasses a plain type is recorded by its type and flagged | 2 | the `isinstance(value, PLAIN_BASE_TYPES)` test in `_Snapshot._take_fields` |
 | 3 Dependency group `model-libraries`, installed by the `pip-install` CI job | 0 | `pyproject.toml`, `.github/workflows/ci.yml` |
 
 ## Global Constraints
@@ -37,8 +37,8 @@
 
 ## Review Focus
 
-1. **The cost of a plain value.** The new check sits after every existing check in `_Snapshot.take`, so a call whose arguments are plain JSON runs the same instructions as before. Task 4 measures it. A reordering that puts the object check first fails this.
-2. **A read that raises.** A field whose `getattr` raises, on the input and on the output. The app gets its result, the event is recorded with the object by its type, `flush` returns `False`. (Task 2)
+1. **The cost of a plain value.** A value of exactly a plain type pays one check of its type at the top of `_Snapshot.take` and is never asked for fields. Task 4 measures it.
+2. **A read that raises.** A field whose `getattr` raises, on the input and on the output. The app gets its result, the event is recorded with the object by its type and flagged, nothing is logged and `flush` returns `True`. (Task 2)
 3. **`RecursionError` is not a failed read.** An object that contains itself still ends at the top of the pass, as a cyclic list does. The `except RecursionError: raise` before `except Exception` is what keeps it so. (Task 1)
 4. **The marker is built from the escaped fields.** A Pydantic extra field named `$irimi` gives `"fields": {"$irimi": "literal", "value": {...}}`. (Task 1)
 5. **A dataclass class is not an instance.** `dataclasses.is_dataclass` is true for both. (Task 1)
@@ -53,13 +53,9 @@ packages/sdk/src/irimi/
   _wire/markers.py                   modify: mark_object
   _wire/__init__.py                  modify: export mark_object
   _object_fields.py                  create: read_fields
-  _serialisation.py                  modify: take an object's fields, count failed reads
-  _recording.py                      modify: Payload.unread_objects
-  _labeled_calls.py                  modify: pass the count into the Payload
-  _sdk.py                            modify: Sdk.report_unread_objects
-  _decorators.py                     modify: report the count at the start and end of a call
+  _serialisation.py                  modify: take an object's fields
 packages/sdk/tests/
-  test_recording.py                  modify: objects as fields, a field marked in place, two pins
+  test_recording.py                  modify: objects as fields, a field marked in place, seven pins
   test_fail_open.py                  modify: an object whose fields cannot be read
 packages/store/tests/
   test_record_a_run.py               modify: an app given objects, read through the reader API
@@ -254,17 +250,27 @@ Decisions the signatures leave open:
 
 - `model_dump` and `model_fields` are looked up on the type, never the instance. An instance lookup on a mock or a proxy object answers anything.
 - `model_dump` is never called. See the spec, "A Pydantic model".
-- In `_serialisation.py`, `_Snapshot.take` keeps every existing branch in its order. Only its last line changes, from `return self._record_by_type(value)` to `return self._take_fields(value)`:
+- In `_serialisation.py`, `_Snapshot.take` keeps every existing branch in its order, after one new block at its top. A dict with a key that is not a whole string still ends at `_record_by_type`:
 
 ```python
-    def _take_fields(self, value: object) -> JsonValue:
-        try:
-            fields = read_fields(value)
-        except RecursionError:
-            raise
-        except Exception:
-            return self._record_by_type(value)
-        if fields is None or not _has_whole_names(fields):
+PLAIN_BASE_TYPES = (str, int, float, list, tuple, dict)
+PLAIN_TYPES = frozenset({*PLAIN_BASE_TYPES, bool, type(None)})
+
+
+    def take(self, value: object) -> JsonValue:
+        if type(value) not in PLAIN_TYPES:
+            try:
+                fields = read_fields(value)
+            except RecursionError:
+                raise
+            except Exception:
+                return self._record_by_type(value)
+            if fields is not None:
+                return self._take_fields(value, fields)
+        ...
+
+    def _take_fields(self, value: object, fields: dict[str, object]) -> JsonValue:
+        if isinstance(value, PLAIN_BASE_TYPES) or not _has_whole_names(fields):
             return self._record_by_type(value)
         type_name = name_type(type(value))
         self.approximate_size += len(type_name) + SIZE_OF_A_SMALL_VALUE
@@ -274,7 +280,8 @@ Decisions the signatures leave open:
 - `_has_whole_names(items: dict[str, object]) -> bool` is the existing test on a dict's keys (`all(isinstance(name, str) and _is_whole_text(name) for name in items)`), moved into a module-level function because it now has two callers: the dict branch of `take` and `_take_fields`.
 - The fields go through the existing `_take_object`, which walks each value with `take` and escapes the key `$irimi`. Nothing else is needed for nested objects, lists of objects or the reserved key.
 - The recursion into the fields is outside the `try`. Only reading the fields is the app's code.
-- In this task a read that raises is recorded by its type and not counted. Task 2 adds the count; the bare `except Exception` branch here is its starting point, not the finished behaviour.
+- A read that raises is recorded by its type and flagged. It is not counted as a drop and nothing is logged; Task 2 pins that.
+- A dataclass that subclasses a plain type is recorded by its type and flagged: the object form cannot hold its entries and the plain form cannot hold its fields.
 - `serialise`, `serialise_arguments`, `name_type` and the `RecursionError` handling in `serialise` do not change in this task.
 
 - [ ] **Step 1: Write the failing tests**
@@ -434,104 +441,70 @@ Expected: all pass, including every other test in `test_recording.py` and both f
 
 `git commit -m "Record a dataclass or Pydantic model as its fields so its run can be replayed"`
 
-### Task 2: A read that raises is contained and counted
+### Task 2: A read that raises costs only the object
 
 **Files:**
-- Modify: `packages/sdk/src/irimi/_serialisation.py`, `_recording.py`, `_labeled_calls.py`, `_sdk.py`, `_decorators.py`
-- Test: `packages/sdk/tests/test_fail_open.py`
+- Test: `packages/sdk/tests/test_fail_open.py`, `packages/sdk/tests/test_recording.py`
 
-**Interfaces:**
-- Consumes: `_take_fields` from Task 1.
-- Produces:
+No source changes beyond Task 1. A failed read is not a drop: the event is sent, so `Serialised` and `Payload` carry no count, `Sdk` gains nothing, and `irimi.flush()` keeps its meaning. The marker and the `not_replayable` / `unserialisable_output` flags say the value is incomplete.
 
-```python
-# irimi._serialisation
-@dataclass(frozen=True)
-class Serialised:
-    value: JsonValue
-    is_complete: bool
-    approximate_size: int
-    unread_objects: int
-
-
-# irimi._recording
-@dataclass(frozen=True)
-class Payload:
-    fields: Mapping[str, JsonValue]
-    approximate_size: int
-    unread_objects: int = 0
-
-
-# irimi._sdk.Sdk
-def report_unread_objects(self, count: int) -> None: ...
-```
-
-Decisions the signatures leave open:
-
-- `_Snapshot` gains `self.unread_objects = 0`. The `except Exception` branch of `_take_fields` adds one before recording the object by its type. `serialise` passes the count into `Serialised`; its `RecursionError` branch passes `0`.
-- `describe_start` and `describe_output` in `_labeled_calls.py` pass the count on: `Payload(fields, call_input.approximate_size, call_input.unread_objects)` and the same for the output. `_errors.py` and `_outbound_calls.py` build a `Payload` without it and are not touched.
-- `Sdk.report_unread_objects` returns at once for `0`. Otherwise it calls `self._drops.record(count, "irimi could not read the fields of an object, so it is recorded by its type; the app is unaffected")`. The guard matters: `DropTally.record` logs its warning on the first call, whatever the count.
-- `_decorators._begin_call` calls `SDK.report_unread_objects(payload.unread_objects)` between `describe_start` and `begin_call`, inside the existing `try`. `_end_call` does the same between `describe_end(outcome)` and `end_call`.
-- Nothing is logged at the point of the failure and the exception's text is not kept. The marker in the event names the type.
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Pin the read that raises**
 
 In `packages/sdk/tests/test_fail_open.py`, after `test_a_call_that_could_not_be_recorded_counts_as_not_sent`:
 
 ```python
 OBJECT_THAT_CANNOT_BE_READ = """
-from dataclasses import dataclass
+import logging
+import sys
+from dataclasses import dataclass, field
+
+logging.basicConfig(stream=sys.stdout)
 
 @dataclass
-class Ticket:
-    id: str
-
-    def __getattribute__(self, name):
-        if name == "id":
-            raise RuntimeError
-        return super().__getattribute__(name)
+class Session:
+    user: str
+    token: str = field(init=False)
 
 @irimi.workflow
-def keep(ticket, note):
-    return note
+def keep(session, note):
+    return session
 
-print(keep(Ticket("T-1"), "kept"))
+print(keep(Session("ada"), "kept").user)
 print(irimi.flush())
 """
 
 
-def test_an_object_whose_fields_cannot_be_read_is_recorded_by_its_type_and_counted(
+def test_an_object_whose_fields_cannot_be_read_is_recorded_by_its_type_and_still_sent(
     fake_store: Any,
 ) -> None:
     output = run_app(
         f"irimi.init(store_url={fake_store.url!r})", teardown=OBJECT_THAT_CANNOT_BE_READ
     )
 
-    run_start = next(event for event in fake_store.take_events() if event.get("name") == "keep")
+    session = {"$irimi": "unserialisable", "type": "__main__.Session"}
+    *_, run_start, run_end = fake_store.take_events()
 
-    assert output == "ch_123\nkept\nFalse\n"
-    assert run_start["input"]["args"] == [
-        {"$irimi": "unserialisable", "type": "__main__.Ticket"},
-        "kept",
-    ]
+    assert output == "ch_123\nada\nTrue\n"
+    assert run_start["input"]["args"] == [session, "kept"]
     assert run_start["flags"] == ["not_replayable"]
+    assert (run_end["span_id"], run_end["output"]) == (run_start["span_id"], session)
+    assert run_end["flags"] == ["unserialisable_output"]
 ```
 
-- [ ] **Step 2: Run it to see it fail**
+The app logs to its standard output, so a warning would show in `output`.
 
-Run: `uv run pytest packages/sdk/tests/test_fail_open.py -v -k cannot_be_read`
-Expected: FAIL on `assert output == ...`, with `True` printed where `False` is expected: after Task 1 the object is already recorded by its type, and nothing counts it.
+- [ ] **Step 2: Pin the dataclass that subclasses a plain type**
 
-- [ ] **Step 3: Implement the count**
+In `packages/sdk/tests/test_recording.py`, four dataclasses declared with `init=False` (`TaggedEntries(dict[object, object])`, `TaggedItems(list[object])`, `TaggedText(str)`, `TaggedNumber(int)`, each with `tag: str = "urgent"`) join the parametrised `test_a_run_with_unserialisable_input_is_recorded_and_flagged`: `TaggedEntries({1: 2})`, `TaggedEntries({"amount": 2})`, `TaggedItems([1, 2])`, `TaggedText("refund")`, `TaggedNumber(1250)`. Each is recorded by its type and flagged.
 
-- [ ] **Step 4: Run the whole suite and the checks**
+- [ ] **Step 3: Run the whole suite and the checks**
 
 Run: `uv run pytest && uv run ruff check && uv run ruff format --check && uv run mypy && uv run mypy --python-version 3.10 packages/sdk/src`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
-`git commit -m "Count an object whose fields cannot be read instead of losing its event"`
+`git commit -m "Record an unreadable object by its type without counting it as a drop"`
 
 ### Task 3: The store returns the fields and calls the run replayable
 
@@ -634,7 +607,7 @@ Expected:
 - the dataclass and model rows are within twice the plain dict holding the same data;
 - the three object rows now say `complete=True`.
 
-If a plain row moved by more than run-to-run noise, the object check is in the wrong place in `take`. Fix that; do not accept it.
+If a plain row moved by more than that, a value of exactly a plain type is being asked for its fields. Fix that; do not accept it.
 
 - [ ] **Step 3: Put both tables in the PR body**, with the Python version and machine.
 

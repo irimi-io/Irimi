@@ -13,7 +13,6 @@ from irimi._wire import EndEvent, Event, JsonValue, StartEvent, field_names
 class Payload:
     fields: Mapping[str, JsonValue]
     approximate_size: int
-    unread_objects: int = 0
 
 
 class Run:

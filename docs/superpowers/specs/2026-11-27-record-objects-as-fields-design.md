@@ -77,16 +77,26 @@ Settled here:
 - **Pydantic v1 models** have no `model_dump`, so by the decided detection rule they are not
   objects with fields. They are recorded by their type and flagged, as today. The same goes for
   `pydantic.v1` models inside Pydantic 2.
-- **A value that is already plain wins.** The new check runs only for a value the pass would
-  otherwise record by its type, so a dataclass that subclasses `dict` or `list` is still
-  recorded as that dict or list. This keeps the cost of plain values unchanged.
+- **A value of exactly a plain type is never asked for fields.** A `str`, `bool`, `int`, `float`,
+  `None`, `list`, `tuple` or `dict` goes straight to the existing branches, at the cost of one
+  check of its type. Any other value is asked for its fields first. A subclass of a plain type
+  with no fields (a named tuple, an `IntEnum`, an `OrderedDict`) is recorded as the plain value,
+  as today.
+- **A dataclass that subclasses a plain type** (`dict`, `list`, `tuple`, `str`, `int`, `float`)
+  holds two things, its fields and its entries or value, and neither form can carry both. It is
+  recorded by its type and flagged, whatever its keys. Proposed: on `main` it was recorded as the
+  plain value with its fields left out and no flag.
+- **A dict is never recorded as an object.** A dict whose keys are not all whole strings is
+  recorded by its type and flagged, as today.
 - **A field whose value is unserialisable** (a `datetime`, a database session) gets the
   `unserialisable` marker in place, inside `fields`. The rest of the object is recorded. The
   result is not complete, so the flags below are set exactly as for any unserialisable value.
 - **A read that raises** (a `getattr` on a field, `dataclasses.fields`, `model_extra`) never
   reaches the app. The object is recorded by its type, in place, the rest of the event is
-  recorded, the result is not complete, and the failure is counted: one warning is logged the
-  first time and the next `irimi.flush()` returns `False`. Without this, the exception would be
+  recorded, and the result is not complete, so the flags below are set. Nothing is counted as
+  dropped and nothing is logged: the event is sent, and `irimi.flush()` keeps its meaning. A
+  dataclass with an unset `field(init=False)` and a model from `model_construct()` missing a
+  field are ordinary objects that end here. Without the containment, the exception would be
   caught by the decorator and the whole start or end event lost.
 - **Cycles and depth.** No cycle tracking is added. An object that contains itself, or objects
   nested past the recursion limit, end as they do today: `RecursionError` is caught at the top
@@ -146,8 +156,12 @@ Through the public SDK API, reading events from the fake store, in
 - a dataclass class and a dataclass that contains itself join the existing parametrised test of
   unserialisable input.
 
-In `packages/sdk/tests/test_fail_open.py`, in a subprocess: an object whose field raises is
-recorded by its type, the app's result is unchanged, and `flush` reports it.
+A dataclass that subclasses `dict` (with and without string keys), `list`, `str` and `int` joins
+the same parametrised test.
+
+In `packages/sdk/tests/test_fail_open.py`, in a subprocess: a dataclass with an unset
+`init=False` field is recorded by its type and flagged, the argument beside it is kept, both
+events are sent, nothing is logged and `flush` returns `True`.
 
 In `packages/store/tests/test_record_a_run.py`: an app run in a subprocess passes a dataclass
 and a Pydantic model to a workflow; the store's reader API returns the fields and lists the run
@@ -168,6 +182,8 @@ which the existing test covers.
 - **Common field types are still unserialisable.** `datetime`, `UUID`, `Decimal`, `Enum`, `set`
   and `bytes` are replaced by a marker, so a model holding one is still `not_replayable`. This
   issue does not change that; it is the next thing users will meet.
+- **A subclass of a plain type is asked for its fields before it is recorded as the plain
+  value.** A list of 200 named tuples took 48 µs before and takes 70 µs now (measured).
 - **Cost grows with the number of objects**, as the last row of the table shows. There is no
   size limit on a recorded value today and none is added.
 - **The marker commits the wire to Python's type names** until piece 5 says how they are
@@ -182,9 +198,8 @@ listed so they can be reversed cheaply:
 1. **Pydantic fields are read from `model_fields` and `model_extra`; `model_dump` only detects
    the model.** Proposed. The issue says "detected by its `model_dump` method" and does not say
    how fields are read. To reverse: `read_fields` returns `value.model_dump()` instead.
-2. **A failed read is counted, so the next `flush()` returns `False`.** Proposed. It uses the
-   existing count; `flush` keeps its signature. To reverse: drop `Payload.unread_objects` and
-   the one call that reports it; the marker and the flag stay.
+2. **A dataclass that subclasses a plain type is recorded by its type and flagged.** Proposed.
+   To reverse: the `isinstance(value, PLAIN_BASE_TYPES)` test in `_Snapshot._take_fields`.
 3. **A new dependency group `model-libraries` holding `pydantic`**, included in `dev` and
    installed by the `pip-install` CI job, which runs the SDK tests outside the workspace.
 4. **Not built:** Pydantic v1 models, `attrs` classes, named tuples (still a list), enums, and

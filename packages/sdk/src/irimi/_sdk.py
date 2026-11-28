@@ -93,15 +93,6 @@ class Sdk:
     def report_failure(self, action: str) -> None:
         self._drops.record(1, f"irimi failed to {action}; the app is unaffected", True)
 
-    def report_unread_objects(self, count: int) -> None:
-        if count == 0:
-            return
-        self._drops.record(
-            count,
-            "irimi could not read the fields of an object, so it is recorded by its type; "
-            "the app is unaffected",
-        )
-
     def _start_recording(
         self,
         arguments: InitArguments,

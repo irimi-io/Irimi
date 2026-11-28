@@ -126,41 +126,41 @@ def test_a_call_that_could_not_be_recorded_counts_as_not_sent(fake_store: Any) -
 
 
 OBJECT_THAT_CANNOT_BE_READ = """
-from dataclasses import dataclass
+import logging
+import sys
+from dataclasses import dataclass, field
+
+logging.basicConfig(stream=sys.stdout)
 
 @dataclass
-class Ticket:
-    id: str
-
-    def __getattribute__(self, name):
-        if name == "id":
-            raise RuntimeError
-        return super().__getattribute__(name)
+class Session:
+    user: str
+    token: str = field(init=False)
 
 @irimi.workflow
-def keep(ticket, note):
-    return note
+def keep(session, note):
+    return session
 
-print(keep(Ticket("T-1"), "kept"))
+print(keep(Session("ada"), "kept").user)
 print(irimi.flush())
 """
 
 
-def test_an_object_whose_fields_cannot_be_read_is_recorded_by_its_type_and_counted(
+def test_an_object_whose_fields_cannot_be_read_is_recorded_by_its_type_and_still_sent(
     fake_store: Any,
 ) -> None:
     output = run_app(
         f"irimi.init(store_url={fake_store.url!r})", teardown=OBJECT_THAT_CANNOT_BE_READ
     )
 
-    run_start = next(event for event in fake_store.take_events() if event.get("name") == "keep")
+    session = {"$irimi": "unserialisable", "type": "__main__.Session"}
+    *_, run_start, run_end = fake_store.take_events()
 
-    assert output == "ch_123\nkept\nFalse\n"
-    assert run_start["input"]["args"] == [
-        {"$irimi": "unserialisable", "type": "__main__.Ticket"},
-        "kept",
-    ]
+    assert output == "ch_123\nada\nTrue\n"
+    assert run_start["input"]["args"] == [session, "kept"]
     assert run_start["flags"] == ["not_replayable"]
+    assert (run_end["span_id"], run_end["output"]) == (run_start["span_id"], session)
+    assert run_end["flags"] == ["unserialisable_output"]
 
 
 TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER = """
