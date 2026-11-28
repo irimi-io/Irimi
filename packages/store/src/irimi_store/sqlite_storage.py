@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -9,18 +8,26 @@ from irimi._wire.events import DIGITS_IN_LARGEST_WHOLE_NUMBER, LARGEST_WHOLE_NUM
 
 from irimi_store.pages import InvalidCursorError, Page
 from irimi_store.sqlite_schema import is_unattached, migrate
-from irimi_store.storage import RootSet, StoredRoot
+from irimi_store.storage import CORE_FIELD_NAMES, RootSet, StoredRoot
+from irimi_store.stored_fields import StoredFields, join_fields, split_fields
 
-INSERT_EVENT = """
+CORE_FIELD_COLUMNS = ", ".join(CORE_FIELD_NAMES)
+INSERT_EVENT = f"""
 INSERT OR IGNORE INTO events (
     project, trace_id, id, type, span_id, time_unix_nano,
-    parent_span_id, kind, name, seq, data, created_at_unix_nano, unattached
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    parent_span_id, kind, name, seq, {CORE_FIELD_COLUMNS},
+    data_size, created_at_unix_nano, unattached
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {", ".join("?" for _ in CORE_FIELD_NAMES)}, ?, ?, ?)
 """
-EVENT_COLUMNS = "id, type, trace_id, span_id, time_unix_nano, parent_span_id, kind, name, seq, data"
+INSERT_EVENT_DATA = "INSERT INTO event_data (arrival, data) VALUES (?, ?)"
+EVENT_COLUMNS = f"""
+    id, type, trace_id, span_id, time_unix_nano, parent_span_id, kind, name, seq,
+    {CORE_FIELD_COLUMNS}, data
+"""
+EVENTS_WITH_DATA = "events JOIN event_data USING (arrival)"
 SELECT_RUN_EVENTS = f"""
-SELECT {EVENT_COLUMNS}, arrival
-FROM events WHERE project = ? AND trace_id = ? AND arrival > ? ORDER BY arrival LIMIT ?
+SELECT {EVENT_COLUMNS}, arrival FROM {EVENTS_WITH_DATA}
+WHERE project = ? AND trace_id = ? AND arrival > ? ORDER BY arrival LIMIT ?
 """
 SELECT_ROOTS = f"""
 SELECT {EVENT_COLUMNS}, arrival, (
@@ -28,7 +35,7 @@ SELECT {EVENT_COLUMNS}, arrival, (
     WHERE held.project = events.project AND held.trace_id = events.trace_id
         AND held.type IN ('start', 'end')
 )
-FROM events
+FROM {EVENTS_WITH_DATA}
 WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NULL
     AND arrival < ?
     AND NOT EXISTS (
@@ -40,20 +47,67 @@ WHERE project = ? AND unattached = ? AND type = 'start' AND parent_span_id IS NU
 ORDER BY arrival DESC LIMIT ?
 """
 SELECT_SPAN_EVENTS = f"""
-SELECT {EVENT_COLUMNS} FROM events
+SELECT {EVENT_COLUMNS} FROM {EVENTS_WITH_DATA}
 WHERE project = ? AND trace_id = ? AND span_id = ? ORDER BY arrival
 """
 SELECT_SPAN_END = f"""
-SELECT {EVENT_COLUMNS} FROM events
+SELECT {EVENT_COLUMNS} FROM {EVENTS_WITH_DATA}
 WHERE project = ? AND trace_id = ? AND span_id = ? AND type = 'end' ORDER BY arrival LIMIT 1
 """
 
-EventRow = tuple[str, str, str, str, int, str | None, str | None, str | None, int | None, str]
+EventRow = tuple[
+    str,
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str,
+]
 ArrivedEventRow = tuple[
-    str, str, str, str, int, str | None, str | None, str | None, int | None, str, int
+    str,
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str,
+    int,
 ]
 RootRow = tuple[
-    str, str, str, str, int, str | None, str | None, str | None, int | None, str, int, int
+    str,
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str,
+    int,
+    int,
 ]
 StartColumns = tuple[str | None, str | None, str | None, int | None]
 
@@ -66,23 +120,10 @@ class SqliteStorageEngine:
 
     def add_events(self, project: str, events: Sequence[Event]) -> None:
         created_at = self._read_clock()
-        rows = [
-            (
-                project,
-                event.trace_id,
-                event.id,
-                event.type,
-                event.span_id,
-                event.time_unix_nano,
-                *_write_start_columns(event),
-                json.dumps(event.fields),
-                created_at,
-                is_unattached(event.fields),
-            )
-            for event in events
-        ]
+        stored = [split_fields(event.fields, CORE_FIELD_NAMES) for event in events]
         with self._open_connection() as connection:
-            connection.executemany(INSERT_EVENT, rows)
+            for event, stored_fields in zip(events, stored, strict=True):
+                _add_event(connection, project, event, stored_fields, created_at)
 
     def read_run_events(
         self, project: str, trace_id: str, cursor: str | None, limit: int
@@ -94,8 +135,8 @@ class SqliteStorageEngine:
             ).fetchall()
         shown = rows[:limit]
         return Page(
-            items=tuple(_read_event(row[:10]) for row in shown),
-            next_cursor=str(shown[-1][10]) if len(rows) > limit else None,
+            items=tuple(_read_event(row[:15]) for row in shown),
+            next_cursor=str(shown[-1][15]) if len(rows) > limit else None,
         )
 
     def read_call_events(self, project: str, trace_id: str, span_id: str) -> tuple[Event, ...]:
@@ -117,7 +158,7 @@ class SqliteStorageEngine:
             roots = tuple(_read_root(connection, project, row) for row in shown)
         return Page(
             items=roots,
-            next_cursor=str(shown[-1][10]) if len(rows) > limit else None,
+            next_cursor=str(shown[-1][15]) if len(rows) > limit else None,
         )
 
     @contextmanager
@@ -138,14 +179,41 @@ def _read_arrival_cursor(cursor: str | None, arrival_on_the_first_page: int) -> 
 
 
 def _read_root(connection: sqlite3.Connection, project: str, row: RootRow) -> StoredRoot:
-    start = _read_event(row[:10])
+    start = _read_event(row[:15])
     end_row: EventRow | None = connection.execute(
         SELECT_SPAN_END, (project, start.trace_id, start.span_id)
     ).fetchone()
     end = None if end_row is None else _read_event(end_row)
     if not isinstance(start, StartEvent) or not isinstance(end, EndEvent | None):
         raise TypeError(f"stored root {start.trace_id} is not a start with an end")
-    return StoredRoot(start=start, end=end, events_held=row[11])
+    return StoredRoot(start=start, end=end, events_held=row[16])
+
+
+def _add_event(
+    connection: sqlite3.Connection,
+    project: str,
+    event: Event,
+    stored_fields: StoredFields,
+    created_at: int,
+) -> None:
+    added = connection.execute(
+        INSERT_EVENT,
+        (
+            project,
+            event.trace_id,
+            event.id,
+            event.type,
+            event.span_id,
+            event.time_unix_nano,
+            *_write_start_columns(event),
+            *stored_fields.core,
+            len(stored_fields.data),
+            created_at,
+            is_unattached(event.fields),
+        ),
+    )
+    if added.rowcount == 1:
+        connection.execute(INSERT_EVENT_DATA, (added.lastrowid, stored_fields.data))
 
 
 def _write_start_columns(event: Event) -> StartColumns:
@@ -165,10 +233,9 @@ def _read_event(row: EventRow) -> Event:
         kind,
         name,
         seq,
-        data,
-    ) = row
+    ) = row[:9]
     document: dict[str, JsonValue] = {
-        **json.loads(data),
+        **join_fields(StoredFields(core=row[9:14], data=row[14]), CORE_FIELD_NAMES),
         "id": event_id,
         "type": event_type,
         "trace_id": trace_id,

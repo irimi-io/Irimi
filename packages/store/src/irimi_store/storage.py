@@ -3,10 +3,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from irimi._wire import EndEvent, Event, StartEvent
+from irimi._wire.field_names import ENVIRONMENT, EVENTS_PRODUCED, FLAGS, MODE, STATUS
 
 from irimi_store.pages import Page
 
 DEFAULT_PROJECT = "default"
+CORE_FIELD_NAMES: tuple[str, ...] = (STATUS, FLAGS, ENVIRONMENT, MODE, EVENTS_PRODUCED)
 
 RootSet = Literal["runs", "unattached_calls"]
 

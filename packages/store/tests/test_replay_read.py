@@ -45,6 +45,30 @@ def test_a_run_is_read_back_as_written_in_pages_that_hold_while_events_arrive(
     assert second == {"events": [RUN_NOTE, LATE_NOTE], "next_cursor": None}
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"status": None, "flags": None, "environment": None, "mode": None, "events_produced": None},
+        {
+            "status": True,
+            "flags": "odd",
+            "environment": 7,
+            "mode": {"a": [1]},
+            "events_produced": "2",
+        },
+        {"status": "ok", "flags": ["unattached", {"later": 1}], "events_produced": 2.5},
+    ],
+)
+def test_a_field_the_store_keeps_apart_is_read_back_as_written(
+    store: Any, fields: dict[str, Any]
+) -> None:
+    events = [{**RUN_START, **fields}, {**RUN_NOTE, **fields}, {**RUN_START, "id": "e9"}]
+    store.post("/v1/events", {"events": events})
+
+    assert store.get("/v1/runs/t7c1/events")[1]["events"] == events
+
+
 @pytest.mark.parametrize("query", ["", "?cursor=5"])
 def test_reading_a_run_the_store_does_not_hold_is_not_found(store: Any, query: str) -> None:
     store.post("/v1/events", {"events": [RUN_START]})
