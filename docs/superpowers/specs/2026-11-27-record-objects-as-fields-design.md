@@ -82,10 +82,28 @@ Settled here:
   check of its type. Any other value is asked for its fields first. A subclass of a plain type
   with no fields (a named tuple, an `IntEnum`, an `OrderedDict`) is recorded as the plain value,
   as today.
-- **A dataclass that subclasses a plain type** (`dict`, `list`, `tuple`, `str`, `int`, `float`)
-  holds two things, its fields and its entries or value, and neither form can carry both. It is
-  recorded by its type and flagged, whatever its keys. Proposed: on `main` it was recorded as the
-  plain value with its fields left out and no flag.
+- **An object is recorded as its fields only when its class keeps no state in a base type
+  implemented outside Python.** A dataclass or model that subclasses `dict`, `list`, `tuple`,
+  `str`, `int`, `float`, `set`, `frozenset`, `bytes`, `bytearray`, `collections.deque`, an
+  exception or any other such type holds two things, its fields and its entries or value, and
+  neither form can carry both. It is recorded by its type and flagged, whatever its keys. No
+  type is named in the code. A base counts when it is not `object` and either is a static type
+  or has a constructor of its own that is not written in Python, which is how `copyreg` finds
+  the base whose state a pickle must carry. Checked against real classes on Python 3.10 to 3.15:
+  plain, frozen, `slots`, generic, `ABC` and `Protocol` dataclasses and plain, generic and
+  `RootModel` Pydantic models have no such base (`typing.Generic` is implemented in C from 3.12
+  but has no constructor of its own); `collections.deque` and `array.array` are found although
+  they are not static types on every version. A class compiled by mypyc or Cython counts as
+  implemented outside Python, so it is recorded by its type. Proposed for the plain types: on
+  `main` such a dataclass was recorded as the plain value with its fields left out and no flag.
+  The others were recorded by type and flagged on `main` and still are.
+- **State held in attributes that are not fields is not recorded and not flagged.** A Pydantic
+  private attribute (`PrivateAttr`), an attribute a dataclass sets in `__post_init__` or
+  `__init__` without declaring a field, and what was passed as an `InitVar` are left out of
+  `fields`, and the object is still called complete. Open question for Henry, listed under
+  "Beyond what was approved".
+- **A class that cannot be hashed** (its metaclass defines `__eq__` without `__hash__`) is
+  treated as any class that is not exactly a plain type: its value is recorded as on `main`.
 - **A dict is never recorded as an object.** A dict whose keys are not all whole strings is
   recorded by its type and flagged, as today.
 - **A field whose value is unserialisable** (a `datetime`, a database session) gets the
@@ -119,11 +137,17 @@ complete.
 | such an object with one unserialisable field, at any depth | set | set |
 | such an object whose fields could not be read | set | set |
 | such an object in a cycle or nested too deep | set | set |
+| such an object whose class has a base type implemented outside Python | set | set |
+| such an object holding state in attributes that are not fields | not set | not set |
 | Pydantic v1 model, a dataclass class, any other object | set, as today | set, as today |
 
-`not_replayable` absent now means "the input was captured in full". It does not promise that a
-replay can rebuild the object; that is piece 5's condition to add if it needs one. Runs recorded
-before this change keep their flag, because their data was never captured.
+`not_replayable` absent now means "every plain value and every field of every object in the
+input was captured". It does not mean the input was captured in full: state an object holds
+outside its fields (a Pydantic private attribute, an attribute set in `__post_init__` or
+`__init__` that is not a field, an `InitVar`) is not recorded and sets no flag. It does not
+promise that a replay can rebuild the object either; that is piece 5's condition to add if it
+needs one. Runs recorded before this change keep their flag, because their data was never
+captured.
 
 ## Cost
 
@@ -156,8 +180,8 @@ Through the public SDK API, reading events from the fake store, in
 - a dataclass class and a dataclass that contains itself join the existing parametrised test of
   unserialisable input.
 
-A dataclass that subclasses `dict` (with and without string keys), `list`, `str` and `int` joins
-the same parametrised test.
+A dataclass that subclasses `dict` (with and without string keys), `list`, `set`, `str` and
+`int` joins the same parametrised test, and so does an object whose class cannot be hashed.
 
 In `packages/sdk/tests/test_fail_open.py`, in a subprocess: a dataclass with an unset
 `init=False` field is recorded by its type and flagged, the argument beside it is kept, both
@@ -199,8 +223,10 @@ listed so they can be reversed cheaply:
    the model.** Proposed. The issue says "detected by its `model_dump` method" and does not say
    how fields are read. To reverse: `read_fields` returns `value.model_dump()` instead.
 2. **A dataclass that subclasses a plain type is recorded by its type and flagged.** Proposed.
-   To reverse: the `isinstance(value, PLAIN_BASE_TYPES)` test in `_Snapshot._take_fields`.
+   To reverse: the `keeps_state_outside_attributes` test in `_Snapshot.take`.
 3. **A new dependency group `model-libraries` holding `pydantic`**, included in `dev` and
    installed by the `pip-install` CI job, which runs the SDK tests outside the workspace.
 4. **Not built:** Pydantic v1 models, `attrs` classes, named tuples (still a list), enums, and
    the field types listed under Risks.
+5. **Open question: an object that holds state outside its fields.** Today it is recorded as its
+   fields with no flag. The other choice is to flag it as not replayable. Not decided.

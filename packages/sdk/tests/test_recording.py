@@ -61,6 +61,14 @@ class TaggedItems(list[object]):
         super().__init__(items)
 
 
+@dataclass(init=False)
+class TaggedMembers(set[object]):
+    tag: str = "urgent"
+
+    def __init__(self, members: set[object]) -> None:
+        super().__init__(members)
+
+
 @dataclass
 class TaggedText(str):
     tag: str
@@ -69,6 +77,15 @@ class TaggedText(str):
 @dataclass
 class TaggedNumber(int):
     tag: int
+
+
+class ComparedByIdentity(type):
+    def __eq__(cls, other: object) -> bool:
+        return cls is other
+
+
+class Connection(metaclass=ComparedByIdentity):
+    pass
 
 
 def repeat_a_step_forever() -> Step:
@@ -201,10 +218,12 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
         ("cut \ud83d short", "builtins.str"),
         ({"cut \ud83d short": 1}, "builtins.dict"),
         (Customer, "builtins.type"),
+        (Connection(), f"{__name__}.Connection"),
         (repeat_a_step_forever(), f"{__name__}.Step"),
         (TaggedEntries({1: 2}), f"{__name__}.TaggedEntries"),
         (TaggedEntries({"amount": 2}), f"{__name__}.TaggedEntries"),
         (TaggedItems([1, 2]), f"{__name__}.TaggedItems"),
+        (TaggedMembers({1, 2}), f"{__name__}.TaggedMembers"),
         (TaggedText("refund"), f"{__name__}.TaggedText"),
         (TaggedNumber(1250), f"{__name__}.TaggedNumber"),
     ],
