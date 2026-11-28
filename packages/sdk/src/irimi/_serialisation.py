@@ -4,7 +4,8 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from irimi._wire import JsonValue, escape_reserved_key, mark_unserialisable
+from irimi._object_fields import read_fields
+from irimi._wire import JsonValue, escape_reserved_key, mark_object, mark_unserialisable
 
 SIZE_OF_A_SMALL_VALUE = 8
 
@@ -47,6 +48,10 @@ def _is_whole_text(text: str) -> bool:
     return True
 
 
+def _has_whole_names(items: dict[str, object]) -> bool:
+    return all(isinstance(name, str) and _is_whole_text(name) for name in items)
+
+
 class _Snapshot:
     def __init__(self) -> None:
         self.is_complete = True
@@ -65,11 +70,22 @@ class _Snapshot:
         if isinstance(value, (list, tuple)):
             self.approximate_size += SIZE_OF_A_SMALL_VALUE * len(value)
             return [self.take(item) for item in value]
-        if isinstance(value, dict) and all(
-            isinstance(name, str) and _is_whole_text(name) for name in value
-        ):
+        if isinstance(value, dict) and _has_whole_names(value):
             return self._take_object(value)
-        return self._record_by_type(value)
+        return self._take_fields(value)
+
+    def _take_fields(self, value: object) -> JsonValue:
+        try:
+            fields = read_fields(value)
+        except RecursionError:
+            raise
+        except Exception:
+            return self._record_by_type(value)
+        if fields is None or not _has_whole_names(fields):
+            return self._record_by_type(value)
+        type_name = name_type(type(value))
+        self.approximate_size += len(type_name) + SIZE_OF_A_SMALL_VALUE
+        return mark_object(type_name, self._take_object(fields))
 
     def _take_object(self, items: dict[str, object]) -> JsonValue:
         self.approximate_size += sum(map(len, items)) + SIZE_OF_A_SMALL_VALUE * len(items)

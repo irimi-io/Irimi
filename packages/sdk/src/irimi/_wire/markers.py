@@ -28,6 +28,10 @@ def mark_redacted(reason: str) -> dict[str, JsonValue]:
     return {RESERVED_KEY: "redacted", "reason": reason}
 
 
+def mark_object(type_name: str, fields: JsonValue) -> dict[str, JsonValue]:
+    return {RESERVED_KEY: "object", "type": type_name, "fields": fields}
+
+
 def unescape_reserved_keys(value: JsonValue) -> JsonValue:
     if isinstance(value, list):
         return [unescape_reserved_keys(item) for item in value]
