@@ -28,9 +28,11 @@ print(handle_ticket("T-1042"))
 OUTBOUND_APP = """
 import os
 import httpx2
+import requests
 import irimi
 
 client = httpx2.Client()
+session = requests.Session()
 {setup}
 import httpx
 
@@ -38,6 +40,7 @@ import httpx
 def look_up_both():
     print(client.get(os.environ["UPSTREAM_URL"] + "/a").text)
     print(httpx.get(os.environ["UPSTREAM_URL"] + "/b").text)
+    print(session.get(os.environ["UPSTREAM_URL"] + "/c").text)
 
 look_up_both()
 print(irimi.flush())
@@ -51,7 +54,7 @@ import irimi
 
 @irimi.workflow
 async def look_up_both(session):
-    for path in ("/a", "/b"):
+    for path in ("/a", "/b", "/c"):
         async with session.get(os.environ["UPSTREAM_URL"] + path) as answer:
             print(await answer.text())
 
@@ -253,8 +256,12 @@ def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_reco
 
     call_starts = [event for event in fake_store.take_events() if event.get("kind") == "http"]
 
-    assert output == '{"ok": true}\n{"ok": true}\nTrue\n'
-    assert [start["name"] for start in call_starts] == ["GET 127.0.0.1/a", "GET 127.0.0.1/b"]
+    assert output == '{"ok": true}\n' * 3 + "True\n"
+    assert [start["name"] for start in call_starts] == [
+        "GET 127.0.0.1/a",
+        "GET 127.0.0.1/b",
+        "GET 127.0.0.1/c",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -271,7 +278,7 @@ def test_outbound_calls_reach_the_app_unchanged_whatever_the_store_does(
 ) -> None:
     output = run_script(app.format(setup=setup), UPSTREAM_URL=upstream.url, UNUSED_URL=unused_url)
 
-    assert output == f'{{"ok": true}}\n{{"ok": true}}\n{is_flushed}\n'
+    assert output == '{"ok": true}\n' * 3 + f"{is_flushed}\n"
 
 
 def test_an_aiohttp_irimi_does_not_know_is_left_unpatched_and_works(
