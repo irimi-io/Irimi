@@ -10,6 +10,7 @@ from typing import Literal
 from irimi._aiohttp_patch import patch_aiohttp
 from irimi._httpx_patch import patch_httpx
 from irimi._interception import Interception
+from irimi._urllib3_patch import patch_urllib3
 
 logger = logging.getLogger("irimi")
 
@@ -18,7 +19,7 @@ Patch = Callable[[ModuleType, Interception], bool]
 LIBRARY_PATCHES: dict[str, Patch | None] = {
     "httpx": patch_httpx,
     "httpx2": patch_httpx,
-    "urllib3": None,
+    "urllib3": patch_urllib3,
     "aiohttp": patch_aiohttp,
 }
 UNPATCHED_WARNING = "irimi could not patch %s, so calls made through it are not recorded"

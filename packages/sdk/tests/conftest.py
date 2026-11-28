@@ -180,6 +180,11 @@ def http_library(request: pytest.FixtureRequest) -> Any:
     return importlib.import_module(request.param)
 
 
+@pytest.fixture(params=["httpx", "httpx2", "requests"])
+def sync_http_library(request: pytest.FixtureRequest) -> Any:
+    return importlib.import_module(request.param)
+
+
 @pytest.fixture
 def unused_url() -> str:
     with socket.socket() as unused:

@@ -24,7 +24,7 @@ def take_call(recorded_events: TakeEvents) -> tuple[dict[str, Any], dict[str, An
 
 
 def test_a_compressed_response_is_recorded_as_it_arrived(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any
 ) -> None:
     upstream.set_answer(
         "/orders",
@@ -34,8 +34,7 @@ def test_a_compressed_response_is_recorded_as_it_arrived(
 
     @irimi.workflow
     def read_orders() -> Any:
-        with http_library.Client() as client:
-            return client.get(f"{upstream.url}/orders").json()
+        return sync_http_library.get(f"{upstream.url}/orders").json()
 
     assert read_orders() == {"ok": True}
 
@@ -77,7 +76,7 @@ def test_a_binary_body_is_recorded_as_base64(
 def test_a_response_larger_than_the_limit_is_cut_and_flagged(
     recorded_events: TakeEvents,
     upstream: Any,
-    http_library: Any,
+    sync_http_library: Any,
     content: bytes,
     recorded_length: int,
 ) -> None:
@@ -85,8 +84,7 @@ def test_a_response_larger_than_the_limit_is_cut_and_flagged(
 
     @irimi.workflow
     def download_export() -> bytes:
-        with http_library.Client() as client:
-            return bytes(client.get(f"{upstream.url}/export").content)
+        return bytes(sync_http_library.get(f"{upstream.url}/export").content)
 
     assert download_export() == content
 
@@ -359,14 +357,13 @@ def test_a_request_that_cannot_be_sent_is_recorded_and_raised_unchanged(
 
 @pytest.mark.parametrize(("method", "status"), [("DELETE", 204), ("HEAD", 200)])
 def test_a_response_with_no_body_has_no_body_recorded(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any, method: str, status: int
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any, method: str, status: int
 ) -> None:
     upstream.set_answer("/refunds/re_456", status=status, chunks=[])
 
     @irimi.workflow
     def touch_refund() -> int:
-        with http_library.Client() as client:
-            return int(client.request(method, f"{upstream.url}/refunds/re_456").status_code)
+        return int(sync_http_library.request(method, f"{upstream.url}/refunds/re_456").status_code)
 
     assert touch_refund() == status
 
