@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import threading
+import itertools
 
 from irimi._bodies import BodyCopy, CopiedBody
 from irimi._interception import Interception, OpenCall
@@ -16,8 +16,7 @@ class ResponseRecording:
         self._response = response
         self._body: BodyCopy | None = BodyCopy() if open_call.is_attached else None
         self._has_copy_failed = False
-        self._is_ended = False
-        self._end_lock = threading.Lock()
+        self._ends_asked_for = itertools.count()
 
     def add(self, chunk: bytes) -> None:
         body_copy = self._body
@@ -31,7 +30,8 @@ class ResponseRecording:
             self._interception.report_failure("copy an outbound response body")
 
     def end(self, was_read_to_end: bool, error: BaseException | None) -> None:
-        if not self._claim_end():
+        is_first_end = next(self._ends_asked_for) == 0
+        if not is_first_end:
             return
         try:
             outcome = CallOutcome(
@@ -48,13 +48,6 @@ class ResponseRecording:
     def _release_body(self) -> CopiedBody | None:
         body_copy, self._body = self._body, None
         return body_copy.take() if body_copy is not None else None
-
-    def _claim_end(self) -> bool:
-        with self._end_lock:
-            if self._is_ended:
-                return False
-            self._is_ended = True
-            return True
 
 
 def end_without_response(

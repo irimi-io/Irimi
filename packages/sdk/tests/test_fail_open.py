@@ -82,6 +82,45 @@ asyncio.run(main())
 """
 
 
+CALLS_RECORDED_INSIDE_EVERY_STEP_OF_IRIMI = """
+import os
+import sys
+import threading
+import urllib3
+import irimi
+
+irimi_directory = os.path.dirname(irimi.__file__)
+steps_interrupted = set()
+
+@irimi.function
+def note():
+    return None
+
+def record_a_call_inside_each_step_of_irimi(frame, event, argument):
+    if not frame.f_code.co_filename.startswith(irimi_directory):
+        return None
+    frame.f_trace_opcodes = True
+    step = (frame.f_code, frame.f_lasti)
+    if event == "opcode" and step not in steps_interrupted:
+        steps_interrupted.add(step)
+        note()
+    return record_a_call_inside_each_step_of_irimi
+
+@irimi.workflow
+def handle_ticket():
+    note()
+    return urllib3.request("GET", os.environ["UPSTREAM_URL"] + "/orders").status
+
+irimi.init(store_url=os.environ["STORE_URL"])
+threading.settrace(record_a_call_inside_each_step_of_irimi)
+sys.settrace(record_a_call_inside_each_step_of_irimi)
+print(handle_ticket())
+print(irimi.flush())
+sys.settrace(None)
+print(irimi.flush())
+"""
+
+
 def run_app(setup: str, teardown: str = "", **environment: str) -> str:
     return run_script(APP.format(setup=setup, teardown=teardown), **environment)
 
@@ -272,6 +311,29 @@ def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
     assert sum(map(len, body_sizes_per_batch)) == 6
     for body_sizes in body_sizes_per_batch:
         assert sum(body_sizes) <= BATCH_SIZE_LIMIT or len(body_sizes) == 1
+
+
+def test_a_call_recorded_while_irimi_is_recording_another_neither_blocks_nor_is_miscounted(
+    fake_store: Any, upstream: Any
+) -> None:
+    output = run_script(
+        CALLS_RECORDED_INSIDE_EVERY_STEP_OF_IRIMI,
+        STORE_URL=fake_store.url,
+        UPSTREAM_URL=upstream.url,
+    )
+
+    events = fake_store.take_events()
+    starts = [event for event in events if event["type"] == "start"]
+    ends = [event["span_id"] for event in events if event["type"] == "end"]
+    numbers_per_run: dict[str, list[int]] = {}
+    for start in starts:
+        numbers_per_run.setdefault(start["trace_id"], []).append(start["seq"])
+
+    assert output == "200\nTrue\nTrue\n"
+    assert len(starts) > 100
+    assert sorted(ends) == sorted(start["span_id"] for start in starts)
+    for numbers in numbers_per_run.values():
+        assert sorted(numbers) == list(range(len(numbers)))
 
 
 def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
