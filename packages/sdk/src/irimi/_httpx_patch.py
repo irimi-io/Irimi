@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from types import ModuleType
 from typing import Any
 
-from irimi._bodies import BodyCopy
+from irimi._bodies import BodyCopy, CopiedBody
 from irimi._interception import Interception, OpenCall
 from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundResponse
 
-PATCH_TARGETS = (
+TRANSPORT_METHODS = (
     "HTTPTransport.handle_request",
     "AsyncHTTPTransport.handle_async_request",
+)
+PATCH_TARGETS = (
+    *TRANSPORT_METHODS,
     "SyncByteStream",
     "AsyncByteStream",
     "ByteStream",
@@ -22,6 +26,8 @@ PATCH_TARGETS = (
 
 def patch_httpx(library: ModuleType, interception: Interception) -> bool:
     if not all(_find_attribute(library, path) is not None for path in PATCH_TARGETS):
+        return False
+    if not all(_takes_one_request(_find_attribute(library, path)) for path in TRANSPORT_METHODS):
         return False
     handle_request = _wrap_sync_transport(library, interception)
     handle_async_request = _wrap_async_transport(library, interception)
@@ -43,10 +49,11 @@ class _ResponseRecording:
         self._end_lock = threading.Lock()
 
     def add(self, chunk: bytes) -> None:
-        if self._body is None:
+        body_copy = self._body
+        if body_copy is None:
             return
         try:
-            self._body.add(chunk)
+            body_copy.add(chunk)
         except Exception:
             self._body = None
             self._has_copy_failed = True
@@ -58,7 +65,7 @@ class _ResponseRecording:
         try:
             outcome = CallOutcome(
                 response=self._response,
-                body=self._body.take() if self._body is not None else None,
+                body=self._release_body(),
                 is_body_complete=is_body_complete and not self._has_copy_failed,
                 error=error,
             )
@@ -66,6 +73,10 @@ class _ResponseRecording:
             self._interception.report_failure("take the copy of an outbound response body")
             return
         self._interception.end(self._open_call, outcome)
+
+    def _release_body(self) -> CopiedBody | None:
+        body_copy, self._body = self._body, None
+        return body_copy.take() if body_copy is not None else None
 
     def _claim_end(self) -> bool:
         with self._end_lock:
@@ -232,6 +243,12 @@ async def _close_async_stream(stream: Any) -> None:
         stream.recording.end(is_body_complete=False, error=None)
     finally:
         await stream.inner_stream.aclose()
+
+
+def _takes_one_request(send_request: object) -> bool:
+    if not callable(send_request):
+        return False
+    return list(inspect.signature(send_request).parameters)[1:] == ["request"]
 
 
 def _find_attribute(root: object, path: str) -> object:
