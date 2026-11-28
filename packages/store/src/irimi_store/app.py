@@ -32,6 +32,7 @@ from irimi_store.storage import DEFAULT_PROJECT, NotHeldError, StorageEngine
 ACCEPTED_VERSIONS = (WIRE_VERSION,)
 DEFAULT_EVENT_PAGE_LIMIT = 500
 LARGEST_EVENT_PAGE_LIMIT = 1000
+EVENT_PAGE_SIZE_LIMIT = 8 * 1024 * 1024
 
 
 def create_app(storage: StorageEngine) -> Starlette:
@@ -107,11 +108,16 @@ def _read_event_page(
     storage: StorageEngine, trace_id: str, page_request: PageRequest
 ) -> Page[Event]:
     page = storage.read_run_events(
-        DEFAULT_PROJECT, trace_id, page_request.cursor, page_request.limit
+        DEFAULT_PROJECT, trace_id, page_request.cursor, page_request.limit, EVENT_PAGE_SIZE_LIMIT
     )
     if page.items:
         return page
     is_first_page = page_request.cursor is None
-    if is_first_page or not storage.read_run_events(DEFAULT_PROJECT, trace_id, None, 1).items:
+    if is_first_page or not _holds_run(storage, trace_id):
         raise NotHeldError(f"no run with id {trace_id}")
     return page
+
+
+def _holds_run(storage: StorageEngine, trace_id: str) -> bool:
+    first_event = storage.read_run_events(DEFAULT_PROJECT, trace_id, None, 1, EVENT_PAGE_SIZE_LIMIT)
+    return bool(first_event.items)

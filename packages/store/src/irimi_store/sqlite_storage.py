@@ -6,7 +6,7 @@ from pathlib import Path
 from irimi._wire import EndEvent, Event, JsonValue, StartEvent, parse_event
 from irimi._wire.events import DIGITS_IN_LARGEST_WHOLE_NUMBER, LARGEST_WHOLE_NUMBER
 
-from irimi_store.pages import InvalidCursorError, Page
+from irimi_store.pages import InvalidCursorError, Page, count_items_that_fit
 from irimi_store.sqlite_schema import is_unattached, migrate
 from irimi_store.storage import CORE_FIELD_NAMES, RootSet, StoredRoot
 from irimi_store.stored_fields import StoredFields, join_fields, split_fields
@@ -26,9 +26,13 @@ CORE_EVENT_COLUMNS = f"""
 """
 EVENT_COLUMNS = f"{CORE_EVENT_COLUMNS}, data"
 EVENTS_WITH_DATA = "events JOIN event_data USING (arrival)"
-SELECT_RUN_EVENTS = f"""
-SELECT {EVENT_COLUMNS}, arrival FROM {EVENTS_WITH_DATA}
+SELECT_RUN_EVENT_SIZES = """
+SELECT arrival, data_size FROM events
 WHERE project = ? AND trace_id = ? AND arrival > ? ORDER BY arrival LIMIT ?
+"""
+SELECT_RUN_EVENTS = f"""
+SELECT {EVENT_COLUMNS} FROM {EVENTS_WITH_DATA}
+WHERE project = ? AND trace_id = ? AND arrival > ? AND arrival <= ? ORDER BY arrival
 """
 SELECT_RUN_CORE_EVENTS = f"""
 SELECT {CORE_EVENT_COLUMNS} FROM events WHERE project = ? AND trace_id = ? ORDER BY arrival
@@ -92,24 +96,6 @@ EventRow = tuple[
     str | None,
     str,
 ]
-ArrivedEventRow = tuple[
-    str,
-    str,
-    str,
-    str,
-    int,
-    str | None,
-    str | None,
-    str | None,
-    int | None,
-    str | None,
-    str | None,
-    str | None,
-    str | None,
-    str | None,
-    str,
-    int,
-]
 RootRow = tuple[
     str,
     str,
@@ -146,17 +132,23 @@ class SqliteStorageEngine:
                 _add_event(connection, project, event, stored_fields, created_at)
 
     def read_run_events(
-        self, project: str, trace_id: str, cursor: str | None, limit: int
+        self, project: str, trace_id: str, cursor: str | None, limit: int, size_limit: int
     ) -> Page[Event]:
         after_arrival = _read_arrival_cursor(cursor, 0)
         with self._open_connection() as connection:
-            rows: list[ArrivedEventRow] = connection.execute(
-                SELECT_RUN_EVENTS, (project, trace_id, after_arrival, limit + 1)
+            sizes: list[tuple[int, int]] = connection.execute(
+                SELECT_RUN_EVENT_SIZES, (project, trace_id, after_arrival, limit + 1)
             ).fetchall()
-        shown = rows[:limit]
+            shown = sizes[: count_items_that_fit([size for _, size in sizes], limit, size_limit)]
+            if not shown:
+                return Page(items=(), next_cursor=None)
+            last_arrival = shown[-1][0]
+            rows: list[EventRow] = connection.execute(
+                SELECT_RUN_EVENTS, (project, trace_id, after_arrival, last_arrival)
+            ).fetchall()
         return Page(
-            items=tuple(_read_event(row[:15]) for row in shown),
-            next_cursor=str(shown[-1][15]) if len(rows) > limit else None,
+            items=tuple(_read_event(row) for row in rows),
+            next_cursor=str(last_arrival) if len(sizes) > len(shown) else None,
         )
 
     def read_run_core_events(self, project: str, trace_id: str) -> tuple[Event, ...]:

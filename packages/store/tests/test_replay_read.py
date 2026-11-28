@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ RUN_NOTE = {
     "time_unix_nano": "1795341601000000000",
 }
 LATE_NOTE = {**RUN_NOTE, "id": "e4"}
+MEGABYTE = 1024 * 1024
 
 
 def test_a_run_is_read_back_as_written_in_pages_that_hold_while_events_arrive(
@@ -67,6 +69,23 @@ def test_a_field_the_store_keeps_apart_is_read_back_as_written(
     store.post("/v1/events", {"events": events})
 
     assert store.get("/v1/runs/t7c1/events")[1]["events"] == events
+
+
+def test_a_run_of_large_events_is_read_in_pages_bounded_by_size(store: Any) -> None:
+    events = [
+        {**RUN_NOTE, "id": f"n{number}", "text": "x" * (megabytes * MEGABYTE)}
+        for number, megabytes in enumerate([3, 3, 3, 9, 1])
+    ]
+    for event in events:
+        store.post("/v1/events", {"events": [event]})
+
+    pages = [store.get("/v1/runs/t7c1/events")[1]]
+    while pages[-1]["next_cursor"] is not None:
+        pages.append(store.get(f"/v1/runs/t7c1/events?cursor={pages[-1]['next_cursor']}")[1])
+
+    assert [event for page in pages for event in page["events"]] == events
+    assert all(page["events"] for page in pages)
+    assert max(len(json.dumps(page)) for page in pages if len(page["events"]) > 1) <= 8 * MEGABYTE
 
 
 @pytest.mark.parametrize("query", ["", "?cursor=5"])
