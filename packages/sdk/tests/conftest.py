@@ -141,7 +141,8 @@ class FakeUpstream:
             def _send_whole(self, content: bytes) -> None:
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
-                self.wfile.write(content)
+                if self.command != "HEAD":
+                    self.wfile.write(content)
 
             def _send_chunked(self, answer: UpstreamAnswer) -> None:
                 self.send_header("Transfer-Encoding", "chunked")
