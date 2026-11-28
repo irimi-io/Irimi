@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlsplit
 
 from irimi._bodies import CopiedBody, copy_body, describe_body
 from irimi._credential_headers import replace_credential_values
 from irimi._errors import describe_error
+from irimi._llm_providers import recognise_llm_call
 from irimi._recording import Payload
 from irimi._url_credentials import remove_userinfo
 from irimi._wire import Flag, JsonValue, field_names, write_flags
@@ -40,9 +42,20 @@ class CallOutcome:
     error: BaseException | None
 
 
-def name_http_call(call: OutboundCall) -> str:
+@dataclass(frozen=True)
+class CallIdentity:
+    kind: Literal["http", "llm"]
+    name: str
+
+
+def identify_call(call: OutboundCall) -> CallIdentity:
     address = urlsplit(call.url)
-    return f"{call.method} {address.hostname or ''}{address.path or '/'}"
+    host = address.hostname or ""
+    path = address.path or "/"
+    llm_name = recognise_llm_call(call.method, host, path)
+    if llm_name is not None:
+        return CallIdentity("llm", llm_name)
+    return CallIdentity("http", f"{call.method} {host}{path}")
 
 
 def describe_request(call: OutboundCall, is_attached: bool) -> Payload:
