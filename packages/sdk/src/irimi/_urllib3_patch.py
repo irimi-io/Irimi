@@ -7,15 +7,17 @@ from collections.abc import Callable, Iterator
 from types import GeneratorType, ModuleType
 from typing import Any
 
+from irimi._bodies import BODY_LIMIT
 from irimi._interception import Interception, OpenCall
 from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundResponse
 from irimi._response_recording import ResponseRecording
 
 FOLLOWED_RESPONSE_ATTRIBUTE = "_irimi_followed_response"
 LEADING_REQUEST_PARAMETERS = ["self", "conn", "method", "url"]
-KEYWORD_REQUEST_PARAMETERS = {"body", "headers"}
+RECORDED_REQUEST_PARAMETERS = ("body", "headers")
 RESPONSE_METHODS = ("_raw_read", "_handle_chunk", "read_chunked", "close", "isclosed")
 DEFAULT_PORTS = {"http": 80, "https": 443}
+LONGEST_BODY_TAKEN = BODY_LIMIT + 1
 
 
 def patch_urllib3(library: ModuleType, interception: Interception) -> bool:
@@ -43,9 +45,8 @@ def _sends_one_request(make_request: object) -> bool:
     if not callable(make_request):
         return False
     parameters = list(inspect.signature(make_request).parameters)
-    return (
-        parameters[:4] == LEADING_REQUEST_PARAMETERS
-        and set(parameters) >= KEYWORD_REQUEST_PARAMETERS
+    return parameters[:4] == LEADING_REQUEST_PARAMETERS and set(parameters) >= set(
+        RECORDED_REQUEST_PARAMETERS
     )
 
 
@@ -166,12 +167,22 @@ def _wrap_make_request(
     send_request = library.HTTPConnectionPool._make_request
     response_class = library.HTTPResponse
     skipped_header_value = library.util.SKIP_HEADER
+    later_parameters = list(inspect.signature(send_request).parameters)[4:]
+    body_position, headers_position = map(later_parameters.index, RECORDED_REQUEST_PARAMETERS)
 
     @functools.wraps(send_request)
     def _make_request(
         pool: Any, conn: Any, method: Any, url: Any, *arguments: Any, **options: Any
     ) -> Any:
-        open_call = _begin_call(interception, pool, method, url, options, skipped_header_value)
+        open_call = _begin_call(
+            interception,
+            pool,
+            method,
+            url,
+            _find_argument("body", body_position, arguments, options),
+            _find_argument("headers", headers_position, arguments, options),
+            skipped_header_value,
+        )
         if open_call is None:
             return send_request(pool, conn, method, url, *arguments, **options)
         attempt = _Attempt(open_call)
@@ -260,15 +271,16 @@ def _begin_call(
     pool: Any,
     method: Any,
     target: Any,
-    options: dict[str, Any],
+    body: Any,
+    headers: Any,
     skipped_header_value: object,
 ) -> OpenCall | None:
     try:
-        in_memory_body = _find_in_memory_body(options.get("body"))
+        in_memory_body = _find_in_memory_body(body) if interception.is_inside_workflow() else b""
         call = OutboundCall(
             method=str(method),
             url=_build_url(str(pool.scheme), str(pool.host), pool.port, str(target)),
-            headers=_translate_request_headers(options.get("headers"), skipped_header_value),
+            headers=_translate_request_headers(headers, skipped_header_value),
             body=in_memory_body or None,
             has_streamed_body=in_memory_body is None,
         )
@@ -286,15 +298,25 @@ def _build_url(scheme: str, host: str, port: int | None, target: str) -> str:
     return f"{scheme}://{bracketed_host}{shown_port}{target}"
 
 
+def _find_argument(
+    name: str, position: int, arguments: tuple[Any, ...], options: dict[str, Any]
+) -> Any:
+    if name in options:
+        return options[name]
+    return arguments[position] if position < len(arguments) else None
+
+
 def _find_in_memory_body(body: Any) -> bytes | None:
     if body is None:
         return b""
+    if isinstance(body, bytes):
+        return body
     if isinstance(body, str):
-        return body.encode()
+        return body[:LONGEST_BODY_TAKEN].encode()
     if hasattr(body, "read"):
         return None
     try:
-        return bytes(memoryview(body))
+        return bytes(memoryview(body).cast("B")[:LONGEST_BODY_TAKEN])
     except TypeError:
         return None
 

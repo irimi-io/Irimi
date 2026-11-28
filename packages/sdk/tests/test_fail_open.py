@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 THREE_MEGABYTES = 3 * 1024 * 1024
+FOUR_MEGABYTES = 4 * 1024 * 1024
 BATCH_SIZE_LIMIT = 8 * 1024 * 1024
 APP = """
 import irimi
@@ -64,6 +65,24 @@ async def main():
         await look_up_both(session)
 
 asyncio.run(main())
+print(irimi.flush())
+"""
+
+LARGE_UPLOAD_APP = """
+import os
+import tracemalloc
+import urllib3
+import irimi
+
+irimi.init(store_url=os.environ["STORE_URL"])
+report = bytearray(b"x") * (48 * 1024 * 1024)
+
+def upload_report():
+    return urllib3.request("POST", os.environ["UPSTREAM_URL"] + "/reports", body=report).status
+
+tracemalloc.start()
+print({upload}())
+print(tracemalloc.get_traced_memory()[1] < len(report) // 2)
 print(irimi.flush())
 """
 
@@ -288,3 +307,25 @@ def test_an_aiohttp_irimi_does_not_know_is_left_unpatched_and_works(
 
     assert "'aiohttp'" in output.splitlines()[0]
     assert output.splitlines()[1] == '{"ok": true}'
+
+
+@pytest.mark.parametrize(
+    ("upload", "flags", "recorded_size"),
+    [
+        ("upload_report", ["unattached"], 0),
+        ("irimi.workflow(upload_report)", ["request_body_truncated"], FOUR_MEGABYTES),
+    ],
+    ids=["outside a workflow", "inside a workflow"],
+)
+def test_a_large_request_body_is_not_copied_beyond_what_is_recorded(
+    fake_store: Any, upstream: Any, upload: str, flags: list[str], recorded_size: int
+) -> None:
+    output = run_script(
+        LARGE_UPLOAD_APP.format(upload=upload), STORE_URL=fake_store.url, UPSTREAM_URL=upstream.url
+    )
+
+    (call_start,) = [event for event in fake_store.take_events() if event.get("kind") == "http"]
+
+    assert output == "200\nTrue\nTrue\n"
+    assert call_start["flags"] == flags
+    assert len(call_start["request"].get("body", {}).get("data", "")) == recorded_size
