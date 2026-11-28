@@ -15,6 +15,7 @@ class Serialised:
     value: JsonValue
     is_complete: bool
     approximate_size: int
+    unread_objects: int
 
 
 def serialise(value: object) -> Serialised:
@@ -23,9 +24,14 @@ def serialise(value: object) -> Serialised:
         taken = snapshot.take(value)
     except RecursionError:
         return Serialised(
-            mark_unserialisable(name_type(type(value))), is_complete=False, approximate_size=0
+            mark_unserialisable(name_type(type(value))),
+            is_complete=False,
+            approximate_size=0,
+            unread_objects=0,
         )
-    return Serialised(taken, snapshot.is_complete, snapshot.approximate_size)
+    return Serialised(
+        taken, snapshot.is_complete, snapshot.approximate_size, snapshot.unread_objects
+    )
 
 
 def serialise_arguments(
@@ -56,6 +62,7 @@ class _Snapshot:
     def __init__(self) -> None:
         self.is_complete = True
         self.approximate_size = 0
+        self.unread_objects = 0
 
     def take(self, value: object) -> JsonValue:
         if isinstance(value, str):
@@ -80,6 +87,7 @@ class _Snapshot:
         except RecursionError:
             raise
         except Exception:
+            self.unread_objects += 1
             return self._record_by_type(value)
         if fields is None or not _has_whole_names(fields):
             return self._record_by_type(value)

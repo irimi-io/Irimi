@@ -120,6 +120,7 @@ def _begin_call(
     try:
         is_root = recording.recorder.find_current_call() is None
         payload = describe_start(label, arguments, keyword_arguments, recording.settings, is_root)
+        SDK.report_unread_objects(payload.unread_objects)
         return recording.recorder.begin_call(label.kind, label.name, payload)
     except Exception:
         SDK.report_failure("record the start of a call")
@@ -135,7 +136,9 @@ def _end_call(
     if call is None or recording is None:
         return
     try:
-        recording.recorder.end_call(call, describe_end(outcome))
+        payload = describe_end(outcome)
+        SDK.report_unread_objects(payload.unread_objects)
+        recording.recorder.end_call(call, payload)
     except Exception:
         SDK.report_failure("record the end of a call")
 

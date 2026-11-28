@@ -40,7 +40,7 @@ def describe_start(
         fields[field_names.READ] = True
     if is_root:
         fields.update(_describe_root(label, settings, call_input.is_complete))
-    return Payload(fields, call_input.approximate_size)
+    return Payload(fields, call_input.approximate_size, call_input.unread_objects)
 
 
 def describe_output(output: object) -> Payload:
@@ -48,7 +48,7 @@ def describe_output(output: object) -> Payload:
     fields: dict[str, JsonValue] = {field_names.STATUS: "ok", field_names.OUTPUT: serialised.value}
     if not serialised.is_complete:
         fields[field_names.FLAGS] = write_flags("unserialisable_output")
-    return Payload(fields, serialised.approximate_size)
+    return Payload(fields, serialised.approximate_size, serialised.unread_objects)
 
 
 def _describe_root(
