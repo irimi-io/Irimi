@@ -21,6 +21,7 @@ from irimi._wire.json_value import JsonValue
 from irimi._wire.markers import (
     escape_reserved_key,
     escape_reserved_keys,
+    mark_redacted,
     mark_unserialisable,
     unescape_reserved_keys,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "WireFormatError",
     "escape_reserved_key",
     "escape_reserved_keys",
+    "mark_redacted",
     "mark_unserialisable",
     "parse_batch",
     "parse_event",

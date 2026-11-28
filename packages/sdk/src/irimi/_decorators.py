@@ -5,7 +5,8 @@ import inspect
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TypeVar, cast, overload
 
-from irimi._labeled_calls import CallLabel, describe_error, describe_output, describe_start
+from irimi._errors import describe_error
+from irimi._labeled_calls import CallLabel, describe_output, describe_start
 from irimi._recording import ActiveCall, Payload
 from irimi._sdk import SDK
 

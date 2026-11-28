@@ -24,6 +24,10 @@ def mark_unserialisable(type_name: str) -> dict[str, JsonValue]:
     return {RESERVED_KEY: "unserialisable", "type": type_name}
 
 
+def mark_redacted(reason: str) -> dict[str, JsonValue]:
+    return {RESERVED_KEY: "redacted", "reason": reason}
+
+
 def unescape_reserved_keys(value: JsonValue) -> JsonValue:
     if isinstance(value, list):
         return [unescape_reserved_keys(item) for item in value]

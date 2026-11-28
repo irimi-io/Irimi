@@ -50,5 +50,5 @@ jobs:
       - run: '"$RUNNER_TEMP/venv/bin/python" -c "import irimi"'
       - if: hashFiles('packages/sdk/tests/**/test_*.py') != ''
         run: |
-          "$RUNNER_TEMP/venv/bin/pip" install pytest
+          "$RUNNER_TEMP/venv/bin/pip" install pytest --group http-clients
           "$RUNNER_TEMP/venv/bin/python" -m pytest packages/sdk/tests

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from irimi._recording import Payload
-from irimi._serialisation import name_type, serialise, serialise_arguments
+from irimi._serialisation import serialise, serialise_arguments
 from irimi._wire import JsonValue, field_names, write_flags
 
 
@@ -49,15 +49,6 @@ def describe_output(output: object) -> Payload:
     if not serialised.is_complete:
         fields[field_names.FLAGS] = write_flags("unserialisable_output")
     return Payload(fields, serialised.approximate_size)
-
-
-def describe_error(error: BaseException) -> Payload:
-    message = serialise(str(error))
-    fields: dict[str, JsonValue] = {
-        field_names.STATUS: "error",
-        field_names.ERROR: {"type": name_type(type(error)), "message": message.value},
-    }
-    return Payload(fields, message.approximate_size)
 
 
 def _describe_root(

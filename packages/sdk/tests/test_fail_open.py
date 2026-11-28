@@ -1,11 +1,12 @@
 import os
-import socket
 import subprocess
 import sys
 from typing import Any
 
 import pytest
 
+THREE_MEGABYTES = 3 * 1024 * 1024
+BATCH_SIZE_LIMIT = 8 * 1024 * 1024
 APP = """
 import irimi
 
@@ -24,10 +25,33 @@ print(handle_ticket("T-1042"))
 """
 
 
+OUTBOUND_APP = """
+import os
+import httpx2
+import irimi
+
+client = httpx2.Client()
+{setup}
+import httpx
+
+@irimi.workflow
+def look_up_both():
+    print(client.get(os.environ["UPSTREAM_URL"] + "/a").text)
+    print(httpx.get(os.environ["UPSTREAM_URL"] + "/b").text)
+
+look_up_both()
+print(irimi.flush())
+"""
+
+
 def run_app(setup: str, teardown: str = "", **environment: str) -> str:
+    return run_script(APP.format(setup=setup, teardown=teardown), **environment)
+
+
+def run_script(script: str, **environment: str) -> str:
     inherited = {name: value for name, value in os.environ.items() if not name.startswith("IRIMI_")}
     completed = subprocess.run(
-        [sys.executable, "-c", APP.format(setup=setup, teardown=teardown)],
+        [sys.executable, "-c", script],
         env={**inherited, **environment},
         capture_output=True,
         text=True,
@@ -35,12 +59,6 @@ def run_app(setup: str, teardown: str = "", **environment: str) -> str:
         check=True,
     )
     return completed.stdout
-
-
-def unused_store_url() -> str:
-    with socket.socket() as unused:
-        unused.bind(("127.0.0.1", 0))
-        return f"http://127.0.0.1:{unused.getsockname()[1]}"
 
 
 def test_importing_irimi_does_not_load_the_modules_only_sending_needs() -> None:
@@ -108,6 +126,9 @@ def test_a_call_that_could_not_be_recorded_counts_as_not_sent(fake_store: Any) -
 
 
 TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER = """
+import os
+import urllib.request
+
 @irimi.workflow
 def measure(text):
     return len(text)
@@ -115,13 +136,18 @@ def measure(text):
 text = "x" * 40_000_000
 measure(text)
 measure(text)
+urllib.request.urlopen(urllib.request.Request(os.environ["RELEASE_URL"], b"", method="POST"))
 print(irimi.flush())
 """
 
 
 def test_events_beyond_the_memory_limit_are_dropped_and_counted(fake_store: Any) -> None:
+    fake_store.hold_answers()
+
     output = run_app(
-        f"irimi.init(store_url={fake_store.url!r})", teardown=TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=TWO_RUNS_TOO_LARGE_TO_WAIT_TOGETHER,
+        RELEASE_URL=fake_store.release_url,
     )
 
     starts = [event for event in fake_store.take_events() if event.get("name") == "measure"]
@@ -130,9 +156,81 @@ def test_events_beyond_the_memory_limit_are_dropped_and_counted(fake_store: Any)
     assert len(starts) == 1
 
 
-def test_an_unreachable_store_never_affects_the_app() -> None:
+SIX_LARGE_ANSWERS = """
+import os
+import httpx
+
+@irimi.workflow
+def download_exports():
+    with httpx.Client() as client:
+        for _ in range(6):
+            client.get(os.environ["UPSTREAM_URL"] + "/export")
+
+download_exports()
+print(irimi.flush())
+"""
+
+
+def test_large_calls_are_sent_in_batches_no_larger_than_the_limit(
+    fake_store: Any, upstream: Any
+) -> None:
+    upstream.set_answer("/export", chunks=[b"x" * THREE_MEGABYTES])
+
     output = run_app(
-        f"irimi.init(store_url={unused_store_url()!r})", teardown="print(irimi.flush())"
+        f"irimi.init(store_url={fake_store.url!r})",
+        teardown=SIX_LARGE_ANSWERS,
+        UPSTREAM_URL=upstream.url,
     )
 
+    body_sizes_per_batch = [
+        [
+            len(event["response"]["body"]["data"])
+            for event in batch["events"]
+            if "body" in event.get("response", {})
+        ]
+        for batch in fake_store.batches
+    ]
+
+    assert output.endswith("True\n")
+    assert len(fake_store.batches) >= 2
+    assert sum(map(len, body_sizes_per_batch)) == 6
+    for body_sizes in body_sizes_per_batch:
+        assert sum(body_sizes) <= BATCH_SIZE_LIMIT or len(body_sizes) == 1
+
+
+def test_an_unreachable_store_never_affects_the_app(unused_url: str) -> None:
+    output = run_app(f"irimi.init(store_url={unused_url!r})", teardown="print(irimi.flush())")
+
     assert output == "ch_123\nFalse\n"
+
+
+def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_recorded(
+    fake_store: Any, upstream: Any
+) -> None:
+    output = run_script(
+        OUTBOUND_APP.format(setup=f"irimi.init(store_url={fake_store.url!r})"),
+        UPSTREAM_URL=upstream.url,
+    )
+
+    call_starts = [event for event in fake_store.take_events() if event.get("kind") == "http"]
+
+    assert output == '{"ok": true}\n{"ok": true}\nTrue\n'
+    assert [start["name"] for start in call_starts] == ["GET 127.0.0.1/a", "GET 127.0.0.1/b"]
+
+
+@pytest.mark.parametrize(
+    ("setup", "is_flushed"),
+    [
+        ("", True),
+        ("irimi.init()", True),
+        ("irimi.init(store_url=os.environ['UNUSED_URL'])", False),
+    ],
+)
+def test_outbound_calls_reach_the_app_unchanged_whatever_the_store_does(
+    upstream: Any, unused_url: str, setup: str, is_flushed: bool
+) -> None:
+    output = run_script(
+        OUTBOUND_APP.format(setup=setup), UPSTREAM_URL=upstream.url, UNUSED_URL=unused_url
+    )
+
+    assert output == f'{{"ok": true}}\n{{"ok": true}}\n{is_flushed}\n'
