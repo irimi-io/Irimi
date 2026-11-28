@@ -51,7 +51,7 @@ def _has_matching_segments(patterns: tuple[str, ...], segments: tuple[str, ...])
 
 
 def _is_matching_segment(pattern: str, segment: str) -> bool:
-    _, placeholder_end, ending = pattern.rpartition("}")
-    if not placeholder_end:
+    if "}" not in pattern:
         return segment == pattern
+    ending = pattern.rpartition("}")[2]
     return len(segment) > len(ending) and segment.endswith(ending)

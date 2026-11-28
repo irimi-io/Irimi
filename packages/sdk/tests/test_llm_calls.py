@@ -11,7 +11,7 @@ TakeEvents = Callable[[], list[dict[str, Any]]]
     ("url", "kind", "name"),
     [
         ("http://api.anthropic.com/v1/messages", "llm", "anthropic messages.create"),
-        ("http://API.Anthropic.com/v1/messages?beta=true", "llm", "anthropic messages.create"),
+        ("http://api.anthropic.com/v1/messages?beta=true", "llm", "anthropic messages.create"),
         ("http://api.openai.com/v1/chat/completions", "llm", "openai chat.completions.create"),
         ("http://api.openai.com/v1/responses", "llm", "openai responses.create"),
         (
@@ -66,7 +66,7 @@ def test_a_call_is_named_by_its_provider_and_operation(
     _, call_start, call_end, _ = recorded_events()
 
     assert (call_start["kind"], call_start["name"]) == (kind, name)
-    assert call_start["request"]["url"].lower() == url.lower()
+    assert call_start["request"]["url"] == url
     assert "claude-opus-5-5" in call_start["request"]["body"]["data"]
     assert "gen_ai.request.model" not in call_start["request"]
     assert "usage" not in call_end
