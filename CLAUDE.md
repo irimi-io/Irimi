@@ -102,4 +102,5 @@ Two rules that hold everywhere:
 ## Git
 
 - Branch per issue, `<issue-number>-<short-slug>`. PRs against `main` with `Closes #<n>`.
+- Fix a minor problem found in a PR in that same PR. Do not open an issue for it.
 - Small PRs, one concern each. Commit messages say what changed and why, in the imperative.

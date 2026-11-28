@@ -206,6 +206,53 @@ def test_a_streamed_response_is_recorded_whole_when_the_stream_ends(
     assert "flags" not in call_end
 
 
+def test_an_event_stream_closed_after_an_event_is_recorded_as_whole(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    upstream.set_answer(
+        "/completions",
+        headers=[("Content-Type", "text/event-stream; charset=utf-8")],
+        chunks=[b"data: one\n\ndata: [DONE]\n\n", b"data: never read\n\n"],
+    )
+
+    @irimi.workflow
+    def follow_completion() -> None:
+        with (
+            http_library.Client() as client,
+            client.stream("POST", f"{upstream.url}/completions") as answer,
+        ):
+            next(line for line in answer.iter_lines() if line == "data: [DONE]")
+
+    follow_completion()
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["response"]["body"]["data"].startswith("data: one\n\ndata: [DONE]\n\n")
+    assert "flags" not in call_end
+
+
+def test_a_text_response_that_stops_inside_a_character_is_recorded_as_text(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    upstream.set_answer("/menu", chunks=[b"caf\xc3"], breaks_off=True)
+
+    @irimi.workflow
+    def read_menu() -> None:
+        with http_library.Client() as client:
+            client.get(f"{upstream.url}/menu")
+
+    with pytest.raises(http_library.RemoteProtocolError):
+        read_menu()
+
+    _, call_end = take_call(recorded_events)
+
+    assert (call_end["response"]["body"]["encoding"], call_end["response"]["body"]["data"]) == (
+        "text",
+        "caf",
+    )
+    assert call_end["flags"] == ["response_body_incomplete"]
+
+
 def test_a_response_closed_early_is_recorded_as_far_as_it_was_read(
     recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:

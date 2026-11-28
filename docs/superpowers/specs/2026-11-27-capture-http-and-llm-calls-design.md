@@ -220,7 +220,8 @@ closed, or an exception is raised. (proposed)
 
 **Headers** are an object from name to value, with names as sent. A value is a string, or the
 redaction marker in place of the string. A header sent more than once has its values joined with
-`, `. A header named `$irimi` is escaped as piece 1's markers require. (proposed)
+`, `. A `Location` value is recorded without any `user:password@` part. A header named `$irimi`
+is escaped as piece 1's markers require. (proposed)
 
 **A body** is an object with `encoding`, `content_type` and `data`. `encoding` is `text` when the
 recorded bytes are valid UTF-8 and `base64` otherwise, and `content_type` is the value of the
@@ -251,7 +252,9 @@ is dropped whole. (proposed)
   read ahead of the library and is not recorded. Such a call cannot be matched on its body in a
   replay.
 - `response_body_incomplete`: the response was closed or failed before all of it was read. What
-  was read is recorded.
+  was read is recorded, and a text body is cut at a character boundary. An event stream
+  (`text/event-stream`) that the app closes right after a whole event is not flagged: clients
+  such as OpenAI's stop at the last event without reading to the end.
 
 ### Credential headers
 

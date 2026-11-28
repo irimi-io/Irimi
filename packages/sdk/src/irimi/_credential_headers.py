@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from irimi._url_credentials import remove_userinfo
 from irimi._wire import JsonValue, escape_reserved_key, mark_redacted
 
 CREDENTIAL_HEADER_NAMES = frozenset(
@@ -25,6 +26,7 @@ CREDENTIAL_HEADER_NAMES = frozenset(
         "dd-api-key",
     }
 )
+URL_HEADER_NAMES = frozenset({"location"})
 
 
 def replace_credential_values(headers: Sequence[tuple[str, str]]) -> dict[str, JsonValue]:
@@ -45,4 +47,6 @@ def _group_by_name(headers: Sequence[tuple[str, str]]) -> dict[str, list[str]]:
 def _record_values(name: str, values: list[str]) -> JsonValue:
     if name.lower() in CREDENTIAL_HEADER_NAMES:
         return mark_redacted("credential")
+    if name.lower() in URL_HEADER_NAMES:
+        return ", ".join(remove_userinfo(value) for value in values)
     return ", ".join(values)

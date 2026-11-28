@@ -37,9 +37,9 @@ def copy_body(content: bytes) -> CopiedBody:
 
 
 def describe_body(
-    body: CopiedBody, content_type: str | None, content_encoding: str | None
+    body: CopiedBody, content_type: str | None, content_encoding: str | None, is_whole: bool
 ) -> dict[str, JsonValue]:
-    description = _encode(body)
+    description = _encode(body.content, is_cut=body.is_truncated or not is_whole)
     if content_type is not None:
         description["content_type"] = content_type
     if content_encoding is not None and content_encoding.lower() != "identity":
@@ -47,12 +47,12 @@ def describe_body(
     return description
 
 
-def _encode(body: CopiedBody) -> dict[str, JsonValue]:
+def _encode(content: bytes, is_cut: bool) -> dict[str, JsonValue]:
     try:
-        return {"encoding": "text", "data": _decode_text(body)}
+        return {"encoding": "text", "data": _decode_text(content, is_cut)}
     except UnicodeDecodeError:
-        return {"encoding": "base64", "data": base64.b64encode(body.content).decode("ascii")}
+        return {"encoding": "base64", "data": base64.b64encode(content).decode("ascii")}
 
 
-def _decode_text(body: CopiedBody) -> str:
-    return codecs.getincrementaldecoder("utf-8")().decode(body.content, final=not body.is_truncated)
+def _decode_text(content: bytes, is_cut: bool) -> str:
+    return codecs.getincrementaldecoder("utf-8")().decode(content, final=not is_cut)
