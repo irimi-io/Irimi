@@ -43,6 +43,7 @@ class Exporter:
         self._drops = drops
         self._offers: queue.SimpleQueue[_Offer | _FlushRequest]
         self._offers_made: AtomicTotal
+        self._sender_claims: AtomicTotal
         self._waiting_count: AtomicTotal
         self._waiting_size: AtomicTotal
         self._flushes_waiting: AtomicTotal
@@ -62,15 +63,15 @@ class Exporter:
             self._drops.record(1, "irimi events were dropped: too many are waiting to be sent")
             return
         self._offers.put(_Offer(event, approximate_size))
-        is_first_offer = self._offers_made.add(1) == 1
-        if is_first_offer:
-            threading.Thread(target=self._send_forever, name="irimi-export", daemon=True).start()
+        self._offers_made.add(1)
+        self._start_sender_if_none_runs()
         if waiting_count >= BATCH_SIZE or waiting_size >= BATCH_SIZE_LIMIT:
             self._wake_sender()
 
     def flush(self, timeout: float | None = None) -> bool:
         if self._offers_made.read() == 0:
             return True
+        self._start_sender_if_none_runs()
         request = _FlushRequest()
         self._flushes_waiting.add(1)
         try:
@@ -83,11 +84,22 @@ class Exporter:
     def _reset(self) -> None:
         self._offers = queue.SimpleQueue()
         self._offers_made = AtomicTotal()
+        self._sender_claims = AtomicTotal()
         self._waiting_count = AtomicTotal()
         self._waiting_size = AtomicTotal()
         self._flushes_waiting = AtomicTotal()
         self._sender_wakes = queue.SimpleQueue()
         self._received = deque()
+
+    def _start_sender_if_none_runs(self) -> None:
+        if self._sender_claims.read() == 0:
+            threading.Thread(
+                target=self._send_as_the_only_sender, name="irimi-export", daemon=True
+            ).start()
+
+    def _send_as_the_only_sender(self) -> None:
+        if self._sender_claims.add(1) == 1:
+            self._send_forever()
 
     def _wake_sender(self) -> None:
         if self._sender_wakes.empty():
