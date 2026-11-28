@@ -201,6 +201,7 @@ def _decode_headers(raw_headers: Any) -> Headers:
 
 
 def _build_recording_reader(library: ModuleType) -> type | None:
+    forwarded_methods = [name for name in FORWARDED_METHODS if hasattr(library.StreamReader, name)]
     members: dict[str, Any] = {
         "__slots__": OWN_SLOTS,
         "__init__": _hold_reader,
@@ -210,7 +211,7 @@ def _build_recording_reader(library: ModuleType) -> type | None:
         "unread_data": _unread_data,
         "readchunk": _read_http_chunk,
         "read_nowait": _read_without_waiting,
-        **{name: _forward_method(name) for name in FORWARDED_METHODS},
+        **{name: _forward_method(name) for name in forwarded_methods},
         **{name: _forward_property(name) for name in FORWARDED_PROPERTIES},
         **{name: _copy_read(name) for name in READS_OF_BYTES},
     }

@@ -642,7 +642,7 @@ def test_the_app_reaches_the_readers_own_attributes(
     recorded_events: TakeEvents, upstream: Any
 ) -> None:
     @irimi.workflow
-    async def raise_the_buffer_limit() -> tuple[int, bool]:
+    async def raise_the_buffer_limit() -> tuple[int, bool, bool]:
         async with (
             aiohttp.ClientSession() as session,
             session.get(f"{upstream.url}/orders") as answer,
@@ -650,9 +650,11 @@ def test_the_app_reaches_the_readers_own_attributes(
             answer.content._low_water = 12345
             low_water, _ = answer.content.get_read_buffer_limits()
             await answer.content.readany()
-            return low_water, answer.content._eof
+            can_set_chunk_size = hasattr(answer.content, "set_read_chunk_size")
+            return low_water, answer.content._eof, can_set_chunk_size
 
-    assert asyncio.run(raise_the_buffer_limit()) == (12345, True)
+    can_set_chunk_size = hasattr(aiohttp.StreamReader, "set_read_chunk_size")
+    assert asyncio.run(raise_the_buffer_limit()) == (12345, True, can_set_chunk_size)
 
 
 def test_a_request_that_cannot_connect_is_recorded_and_raised_unchanged(
