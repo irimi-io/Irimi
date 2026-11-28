@@ -25,12 +25,14 @@ dev = [
     { name = "pytest", specifier = ">=8.4" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "ruff", specifier = ">=0.14" },
+    { name = "urllib3", specifier = ">=2.0.7" },
 ]
 http-clients = [
     { name = "aiohttp", specifier = ">=3.14.5" },
     { name = "httpx", specifier = ">=0.29.0" },
     { name = "httpx2", specifier = ">=2.14.0" },
     { name = "requests", specifier = ">=2.34.2" },
+    { name = "urllib3", specifier = ">=2.0.7" },
 ]
 
 [[package]]
