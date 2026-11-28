@@ -24,10 +24,13 @@ class Interception:
         self._recorder = recorder
         self.report_failure = report_failure
 
+    def is_inside_workflow(self) -> bool:
+        current_call = self._recorder.find_current_call()
+        return current_call is not None and current_call.run.is_workflow
+
     def begin(self, call: OutboundCall) -> OpenCall | None:
         try:
-            current_call = self._recorder.find_current_call()
-            is_attached = current_call is not None and current_call.run.is_workflow
+            is_attached = self.is_inside_workflow()
             payload = describe_request(call, is_attached)
             identity = identify_call(call)
             active_call = self._recorder.begin_detached_call(identity.kind, identity.name, payload)

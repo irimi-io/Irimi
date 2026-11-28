@@ -27,16 +27,15 @@ def note_refund(refund: dict[str, Any]) -> str:
 
 
 def test_an_outbound_call_is_recorded_as_a_step_of_its_run(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any
 ) -> None:
     upstream.set_answer("/v1/refunds", chunks=[b'{"id": "re_456"}'])
 
     @irimi.workflow
     def refund_ticket(amount: int) -> str:
-        with http_library.Client() as client:
-            answer = client.post(
-                f"{upstream.url}/v1/refunds?expand=charge", json={"amount": amount}
-            )
+        answer = sync_http_library.post(
+            f"{upstream.url}/v1/refunds?expand=charge", json={"amount": amount}
+        )
         return note_refund(answer.json())
 
     assert refund_ticket(5) == "re_456"
@@ -52,11 +51,9 @@ def test_an_outbound_call_is_recorded_as_a_step_of_its_run(
     assert call_start["parent_span_id"] == run_start["span_id"]
     assert call_start["request"]["method"] == "POST"
     assert call_start["request"]["url"] == f"{upstream.url}/v1/refunds?expand=charge"
-    assert call_start["request"]["body"] == {
-        "encoding": "text",
-        "content_type": "application/json",
-        "data": '{"amount":5}',
-    }
+    request_body = call_start["request"]["body"]
+    assert (request_body["encoding"], request_body["content_type"]) == ("text", "application/json")
+    assert json.loads(request_body["data"]) == {"amount": 5}
     assert (call_end["span_id"], call_end["status"], call_end["answered"]) == (
         call_start["span_id"],
         "ok",
@@ -124,11 +121,11 @@ def test_a_call_outside_any_workflow_is_recorded_as_unattached_without_bodies(
 
 
 def test_a_call_inside_a_function_outside_any_workflow_is_recorded_without_bodies(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any
 ) -> None:
     @irimi.function
     def report_metrics() -> None:
-        http_library.post(f"{upstream.url}/v1/metrics", json={"cpu": 0.4})
+        sync_http_library.post(f"{upstream.url}/v1/metrics", json={"cpu": 0.4})
 
     report_metrics()
 
@@ -164,7 +161,7 @@ def test_a_call_inside_a_function_outside_any_workflow_is_recorded_without_bodie
     ],
 )
 def test_the_value_of_a_credential_header_is_never_recorded(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any, name: str
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any, name: str
 ) -> None:
     upstream.set_answer(
         "/charges",
@@ -177,10 +174,9 @@ def test_the_value_of_a_credential_header_is_never_recorded(
 
     @irimi.workflow
     def look_up_charges() -> Any:
-        with http_library.Client() as client:
-            return client.get(
-                f"{upstream.url}/charges", headers={name: "sk_live_123", "Idempotency-Key": "k-1"}
-            )
+        return sync_http_library.get(
+            f"{upstream.url}/charges", headers={name: "sk_live_123", "Idempotency-Key": "k-1"}
+        )
 
     answer = look_up_charges()
 
@@ -199,15 +195,14 @@ def test_the_value_of_a_credential_header_is_never_recorded(
 
 
 def test_a_password_in_the_url_is_never_recorded(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any
 ) -> None:
     credentials = base64.b64encode(b"alice:s3cretpw").decode()
     address = upstream.url.replace("http://", "http://alice:s3cretpw@")
 
     @irimi.workflow
     def look_up_invoice() -> int:
-        with http_library.Client() as client:
-            return int(client.get(f"{address}/v1/invoices?limit=3").status_code)
+        return int(sync_http_library.get(f"{address}/v1/invoices?limit=3").status_code)
 
     assert look_up_invoice() == 200
 
@@ -245,14 +240,13 @@ def test_a_password_in_a_redirect_address_is_never_recorded(
 
 
 def test_a_header_sent_twice_is_recorded_once_with_its_values_joined(
-    recorded_events: TakeEvents, upstream: Any, http_library: Any
+    recorded_events: TakeEvents, upstream: Any, sync_http_library: Any
 ) -> None:
     upstream.set_answer("/catalog", headers=[("Vary", "Accept"), ("Vary", "Origin")])
 
     @irimi.workflow
     def read_catalog() -> int:
-        with http_library.Client() as client:
-            return int(client.get(f"{upstream.url}/catalog").status_code)
+        return int(sync_http_library.get(f"{upstream.url}/catalog").status_code)
 
     assert read_catalog() == 200
 
@@ -275,7 +269,7 @@ def print_init_results(arguments: str) -> str:
 
 
 def test_init_reports_the_libraries_it_patched(fake_store: Any) -> None:
-    patched = "patched=('httpx', 'httpx2', 'aiohttp'), unpatched=('urllib3',)"
+    patched = "patched=('httpx', 'httpx2', 'urllib3', 'aiohttp'), unpatched=()"
 
     assert print_init_results(f"store_url={fake_store.url!r}") == (
         f"InitResult(mode='normal', {patched})\n" * 2

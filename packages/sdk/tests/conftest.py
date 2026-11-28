@@ -82,6 +82,7 @@ class UpstreamAnswer:
     )
     chunks: list[bytes] = field(default_factory=lambda: [b'{"ok": true}'])
     breaks_off: bool = False
+    ends_by_closing: bool = False
 
 
 class FakeUpstream:
@@ -119,7 +120,9 @@ class FakeUpstream:
                 self.send_response(answer.status)
                 for name, value in answer.headers:
                     self.send_header(name, value)
-                if answer.breaks_off or len(answer.chunks) > 1:
+                if answer.ends_by_closing:
+                    self._send_until_closed(b"".join(answer.chunks))
+                elif answer.breaks_off or len(answer.chunks) > 1:
                     self._send_chunked(answer)
                 else:
                     self._send_whole(b"".join(answer.chunks))
@@ -140,6 +143,12 @@ class FakeUpstream:
 
             def _send_whole(self, content: bytes) -> None:
                 self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(content)
+
+            def _send_until_closed(self, content: bytes) -> None:
+                self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(content)
 
@@ -177,6 +186,11 @@ def upstream() -> Iterator[FakeUpstream]:
 
 @pytest.fixture(params=["httpx", "httpx2"])
 def http_library(request: pytest.FixtureRequest) -> Any:
+    return importlib.import_module(request.param)
+
+
+@pytest.fixture(params=["httpx", "httpx2", "requests"])
+def sync_http_library(request: pytest.FixtureRequest) -> Any:
     return importlib.import_module(request.param)
 
 
