@@ -49,20 +49,26 @@ class Step:
 class TaggedEntries(dict[object, object]):
     tag: str = "urgent"
 
+    def __init__(self, entries: dict[object, object]) -> None:
+        super().__init__(entries)
+
 
 @dataclass(init=False)
 class TaggedItems(list[object]):
     tag: str = "urgent"
 
+    def __init__(self, items: list[object]) -> None:
+        super().__init__(items)
 
-@dataclass(init=False)
+
+@dataclass
 class TaggedText(str):
-    tag: str = "urgent"
+    tag: str
 
 
-@dataclass(init=False)
+@dataclass
 class TaggedNumber(int):
-    tag: str = "urgent"
+    tag: int
 
 
 def repeat_a_step_forever() -> Step:

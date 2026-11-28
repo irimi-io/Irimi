@@ -495,7 +495,7 @@ The app logs to its standard output, so a warning would show in `output`.
 
 - [ ] **Step 2: Pin the dataclass that subclasses a plain type**
 
-In `packages/sdk/tests/test_recording.py`, four dataclasses declared with `init=False` (`TaggedEntries(dict[object, object])`, `TaggedItems(list[object])`, `TaggedText(str)`, `TaggedNumber(int)`, each with `tag: str = "urgent"`) join the parametrised `test_a_run_with_unserialisable_input_is_recorded_and_flagged`: `TaggedEntries({1: 2})`, `TaggedEntries({"amount": 2})`, `TaggedItems([1, 2])`, `TaggedText("refund")`, `TaggedNumber(1250)`. Each is recorded by its type and flagged.
+In `packages/sdk/tests/test_recording.py`, four dataclasses with a field `tag` (`TaggedEntries(dict[object, object])`, `TaggedItems(list[object])`, `TaggedText(str)`, `TaggedNumber(int)`) join the parametrised `test_a_run_with_unserialisable_input_is_recorded_and_flagged`: `TaggedEntries({1: 2})`, `TaggedEntries({"amount": 2})`, `TaggedItems([1, 2])`, `TaggedText("refund")`, `TaggedNumber(1250)`. Each is recorded by its type and flagged.
 
 - [ ] **Step 3: Run the whole suite and the checks**
 
