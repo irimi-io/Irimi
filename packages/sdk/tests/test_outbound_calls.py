@@ -221,6 +221,29 @@ def test_a_password_in_the_url_is_never_recorded(
     assert upstream.request_headers[-1]["Authorization"] == f"Basic {credentials}"
 
 
+def test_a_password_in_a_redirect_address_is_never_recorded(
+    recorded_events: TakeEvents, upstream: Any, http_library: Any
+) -> None:
+    upstream.set_answer(
+        "/moved",
+        status=302,
+        headers=[("Location", "https://alice:s3cretpw@files.example.com/x")],
+        chunks=[b""],
+    )
+
+    @irimi.workflow
+    def look_up_file() -> None:
+        http_library.get(f"{upstream.url}/moved")
+
+    look_up_file()
+
+    events = recorded_events()
+    _, _, call_end, _ = events
+
+    assert call_end["response"]["headers"]["Location"] == "https://files.example.com/x"
+    assert "s3cretpw" not in json.dumps(events)
+
+
 def test_a_header_sent_twice_is_recorded_once_with_its_values_joined(
     recorded_events: TakeEvents, upstream: Any, http_library: Any
 ) -> None:

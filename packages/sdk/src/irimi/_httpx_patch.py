@@ -59,14 +59,14 @@ class _ResponseRecording:
             self._has_copy_failed = True
             self._interception.report_failure("copy an outbound response body")
 
-    def end(self, is_body_complete: bool, error: BaseException | None) -> None:
+    def end(self, was_read_to_end: bool, error: BaseException | None) -> None:
         if not self._claim_end():
             return
         try:
             outcome = CallOutcome(
                 response=self._response,
                 body=self._release_body(),
-                is_body_complete=is_body_complete and not self._has_copy_failed,
+                was_read_to_end=was_read_to_end and not self._has_copy_failed,
                 error=error,
             )
         except Exception:
@@ -150,7 +150,7 @@ def _begin_call(interception: Interception, request: Any, library: ModuleType) -
 def _end_without_response(
     interception: Interception, open_call: OpenCall | None, error: BaseException
 ) -> None:
-    outcome = CallOutcome(response=None, body=None, is_body_complete=False, error=error)
+    outcome = CallOutcome(response=None, body=None, was_read_to_end=False, error=error)
     interception.end(open_call, outcome)
 
 
@@ -213,14 +213,14 @@ def _iterate_sync_stream(stream: Any) -> Iterator[bytes]:
     except GeneratorExit:
         raise
     except BaseException as error:
-        stream.recording.end(is_body_complete=False, error=error)
+        stream.recording.end(was_read_to_end=False, error=error)
         raise
-    stream.recording.end(is_body_complete=True, error=None)
+    stream.recording.end(was_read_to_end=True, error=None)
 
 
 def _close_sync_stream(stream: Any) -> None:
     try:
-        stream.recording.end(is_body_complete=False, error=None)
+        stream.recording.end(was_read_to_end=False, error=None)
     finally:
         stream.inner_stream.close()
 
@@ -233,14 +233,14 @@ async def _iterate_async_stream(stream: Any) -> AsyncIterator[bytes]:
     except GeneratorExit:
         raise
     except BaseException as error:
-        stream.recording.end(is_body_complete=False, error=error)
+        stream.recording.end(was_read_to_end=False, error=error)
         raise
-    stream.recording.end(is_body_complete=True, error=None)
+    stream.recording.end(was_read_to_end=True, error=None)
 
 
 async def _close_async_stream(stream: Any) -> None:
     try:
-        stream.recording.end(is_body_complete=False, error=None)
+        stream.recording.end(was_read_to_end=False, error=None)
     finally:
         await stream.inner_stream.aclose()
 
