@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from collections import Counter
 from typing import Any
 
 import pytest
@@ -111,10 +112,16 @@ def handle_ticket():
     note()
     return urllib3.request("GET", os.environ["UPSTREAM_URL"] + "/orders").status
 
+@irimi.workflow
+def measure(text):
+    return len(text)
+
 irimi.init(store_url=os.environ["STORE_URL"])
 threading.settrace(record_a_call_inside_each_step_of_irimi)
 sys.settrace(record_a_call_inside_each_step_of_irimi)
 print(handle_ticket())
+print(irimi.flush())
+measure("x" * 70_000_000)
 print(irimi.flush())
 sys.settrace(None)
 print(irimi.flush())
@@ -324,14 +331,18 @@ def test_a_call_recorded_while_irimi_is_recording_another_neither_blocks_nor_is_
 
     events = fake_store.take_events()
     starts = [event for event in events if event["type"] == "start"]
-    ends = [event["span_id"] for event in events if event["type"] == "end"]
+    started = Counter(start["span_id"] for start in starts)
+    ended = Counter(event["span_id"] for event in events if event["type"] == "end")
     numbers_per_run: dict[str, list[int]] = {}
     for start in starts:
         numbers_per_run.setdefault(start["trace_id"], []).append(start["seq"])
 
-    assert output == "200\nTrue\nTrue\n"
+    assert output == "200\nTrue\nFalse\nTrue\n"
     assert len(starts) > 100
-    assert sorted(ends) == sorted(start["span_id"] for start in starts)
+    assert "measure" not in [start["name"] for start in starts]
+    assert set(ended.values()) == {1}
+    assert not started - ended
+    assert len(ended - started) == 1
     for numbers in numbers_per_run.values():
         assert sorted(numbers) == list(range(len(numbers)))
 
