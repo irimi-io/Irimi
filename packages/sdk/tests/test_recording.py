@@ -1,4 +1,5 @@
 import asyncio
+from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +68,11 @@ class TaggedMembers(set[object]):
 
     def __init__(self, members: set[object]) -> None:
         super().__init__(members)
+
+
+@dataclass(init=False)
+class TaggedSamples(array[int]):
+    tag: str = "urgent"
 
 
 @dataclass
@@ -224,6 +230,7 @@ def test_an_exception_is_recorded_and_raised_unchanged(recorded_events: TakeEven
         (TaggedEntries({"amount": 2}), f"{__name__}.TaggedEntries"),
         (TaggedItems([1, 2]), f"{__name__}.TaggedItems"),
         (TaggedMembers({1, 2}), f"{__name__}.TaggedMembers"),
+        (TaggedSamples("i", [1, 2]), f"{__name__}.TaggedSamples"),
         (TaggedText("refund"), f"{__name__}.TaggedText"),
         (TaggedNumber(1250), f"{__name__}.TaggedNumber"),
     ],
