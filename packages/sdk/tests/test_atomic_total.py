@@ -22,13 +22,14 @@ def test_an_amount_added_while_another_is_being_added_is_not_lost() -> None:
             amounts_added_inside += 1
         return add_at_every_step
 
+    trace_function_before = sys.gettrace()
     for _ in range(ROUNDS_UNTIL_EVERY_PYTHON_TRACES_EACH_STEP):
         sys.settrace(add_at_every_step)
         try:
             for _ in range(ADDS_IN_A_ROUND):
                 total.add(1)
         finally:
-            sys.settrace(None)
+            sys.settrace(trace_function_before)
 
     amounts_added_outside = ROUNDS_UNTIL_EVERY_PYTHON_TRACES_EACH_STEP * ADDS_IN_A_ROUND
     assert amounts_added_inside > 0
