@@ -152,6 +152,50 @@ def test_a_json_body_is_keyed_by_value_and_headers_are_ignored() -> None:
     assert keys[3] == ["POST", "https://example.com/x", None]
 
 
+def test_a_text_body_that_is_not_json_is_keyed_by_its_text() -> None:
+    body = {"encoding": "text", "data": "plain words", "content_type": "text/plain"}
+    events = [root(), http_start("call", "POST", body, {})]
+
+    key = read_recorded_run(events).calls[0].match_key
+
+    assert key == ["POST", "https://example.com/x", ["text", "plain words"]]
+
+
+def test_a_response_body_that_does_not_decode_cannot_be_served() -> None:
+    events = [
+        root(),
+        http_start("call", "GET", None, {}),
+        end(
+            "call",
+            response={"status": 200, "headers": {}, "body": {"encoding": "base64", "data": "abc"}},
+        ),
+    ]
+
+    assert read_recorded_run(events).calls[0].result is None
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "expected_role"),
+    [
+        ("http", {"request": {"method": "GET"}}, "http_read"),
+        ("http", {"request": {"method": "HEAD"}}, "http_read"),
+        ("http", {"request": {"method": "OPTIONS"}}, "http_read"),
+        ("http", {"request": {"method": "POST"}}, "http_write"),
+        ("http", {"request": {"method": "DELETE"}}, "http_write"),
+        ("function", {"read": True}, "read_function"),
+        ("function", {"write": True}, "write_function"),
+        ("function", {}, "plain"),
+        ("mystery", {}, "plain"),
+    ],
+)
+def test_each_recorded_call_gets_a_role_from_its_kind_and_flags(
+    kind: str, fields: dict[str, Any], expected_role: str
+) -> None:
+    events = [root(), start("call", 1, kind, "call", "root", **fields)]
+
+    assert read_recorded_run(events).calls[0].role == expected_role
+
+
 def test_a_function_is_keyed_by_its_input_without_unserialisable_markers() -> None:
     session = {"$irimi": "unserialisable", "type": "Session"}
     events = [

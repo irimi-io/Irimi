@@ -23,6 +23,13 @@ ANSWERED = "answered"
 REPLAY = "replay"
 MATCHED = "matched"
 CHANGED = "changed"
+BODY = "body"
+DATA = "data"
+ENCODING = "encoding"
+CONTENT_ENCODING = "content_encoding"
+METHOD = "method"
+URL = "url"
+HEADERS = "headers"
 
 Flag = Literal[
     "not_replayable",
@@ -39,6 +46,11 @@ Flag = Literal[
     "caught_by_proxy",
     "after_divergence",
 ]
+
+NOT_REPLAYABLE: Flag = "not_replayable"
+UNSERIALISABLE_OUTPUT: Flag = "unserialisable_output"
+RESPONSE_BODY_TRUNCATED: Flag = "response_body_truncated"
+RESPONSE_BODY_INCOMPLETE: Flag = "response_body_incomplete"
 
 
 def write_flags(*flags: Flag) -> list[JsonValue]:

@@ -13,8 +13,10 @@ CallRole = Literal["plain", "write_function", "read_function", "llm", "http_read
 
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 FUNCTION_KINDS = frozenset({"function", "workflow"})
-HTTP_ROLES = frozenset({"llm", "http_read", "http_write"})
-UNSERVABLE_RESPONSE_FLAGS = frozenset({"response_body_truncated", "response_body_incomplete"})
+REQUEST_ROLES = frozenset({"llm", "http_read", "http_write"})
+UNSERVABLE_RESPONSE_FLAGS = frozenset(
+    {field_names.RESPONSE_BODY_TRUNCATED, field_names.RESPONSE_BODY_INCOMPLETE}
+)
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,7 @@ def classify_call(kind: str, start_fields: Mapping[str, JsonValue]) -> CallRole:
     if kind == "llm":
         return "llm"
     if kind == "http":
-        method = _read_object(start_fields, field_names.REQUEST).get("method")
+        method = _read_object(start_fields, field_names.REQUEST).get(field_names.METHOD)
         return "http_read" if method in READ_METHODS else "http_write"
     if kind in FUNCTION_KINDS:
         if start_fields.get(field_names.WRITE) is True:
@@ -70,7 +72,7 @@ def classify_call(kind: str, start_fields: Mapping[str, JsonValue]) -> CallRole:
 
 
 def key_call(role: CallRole, start_fields: Mapping[str, JsonValue]) -> JsonValue:
-    if role in HTTP_ROLES:
+    if role in REQUEST_ROLES:
         return _key_request(_read_object(start_fields, field_names.REQUEST))
     return _replace_unserialisable(start_fields.get(field_names.INPUT))
 
@@ -96,7 +98,7 @@ def _find_root(starts: Mapping[str, StartEvent]) -> StartEvent:
     )
     if not roots:
         raise NotReplayableError("The recording has no root call, so there is nothing to replay.")
-    if "not_replayable" in _read_list(roots[0].fields, field_names.FLAGS):
+    if field_names.NOT_REPLAYABLE in _read_list(roots[0].fields, field_names.FLAGS):
         raise NotReplayableError(
             "The recording is flagged not replayable, because its input was not fully recorded."
         )
@@ -132,41 +134,46 @@ def _read_result(role: CallRole, end: EndEvent | None) -> RecordedResponse | Rec
     if end is None or end.fields.get(field_names.STATUS) != "ok":
         return None
     flags = set(_read_list(end.fields, field_names.FLAGS))
-    if role in HTTP_ROLES:
+    if role in REQUEST_ROLES:
         if flags & UNSERVABLE_RESPONSE_FLAGS:
             return None
         return _read_response(_read_object(end.fields, field_names.RESPONSE))
-    if "unserialisable_output" in flags:
+    if field_names.UNSERIALISABLE_OUTPUT in flags:
         return None
     return RecordedOutput(end.fields.get(field_names.OUTPUT))
 
 
 def _read_response(response: Mapping[str, JsonValue]) -> RecordedResponse | None:
-    status = response.get("status")
+    status = response.get(field_names.STATUS)
     if isinstance(status, bool) or not isinstance(status, int):
         return None
-    description = _read_object(response, "body")
+    description = _read_object(response, field_names.BODY)
     body = _decode_body(description)
+    if body is None:
+        return None
     return RecordedResponse(
         status=status,
         headers=_make_servable(
-            _read_headers(response), len(body), "content_encoding" in description
+            _read_headers(response), len(body), field_names.CONTENT_ENCODING in description
         ),
         body=body,
     )
 
 
-def _decode_body(description: Mapping[str, JsonValue]) -> bytes:
-    data = description.get("data")
+def _decode_body(description: Mapping[str, JsonValue]) -> bytes | None:
+    data = description.get(field_names.DATA)
     if not isinstance(data, str):
         return b""
-    if description.get("encoding") == "base64":
-        return base64.b64decode(data)
+    if description.get(field_names.ENCODING) == "base64":
+        try:
+            return base64.b64decode(data)
+        except ValueError:
+            return None
     return data.encode("utf-8")
 
 
 def _read_headers(document: Mapping[str, JsonValue]) -> list[tuple[str, str]]:
-    headers = unescape_reserved_keys(document.get("headers"))
+    headers = unescape_reserved_keys(document.get(field_names.HEADERS))
     if not isinstance(headers, dict):
         return []
     return [(name, value) for name, value in headers.items() if isinstance(value, str)]
@@ -183,14 +190,18 @@ def _make_servable(
 
 
 def _key_request(request: Mapping[str, JsonValue]) -> JsonValue:
-    return [request.get("method"), request.get("url"), _key_body(_read_object(request, "body"))]
+    return [
+        request.get(field_names.METHOD),
+        request.get(field_names.URL),
+        _key_body(_read_object(request, field_names.BODY)),
+    ]
 
 
 def _key_body(description: Mapping[str, JsonValue]) -> JsonValue:
     if not description:
         return None
-    encoding = description.get("encoding")
-    data = description.get("data")
+    encoding = description.get(field_names.ENCODING)
+    data = description.get(field_names.DATA)
     if encoding == "text" and isinstance(data, str):
         try:
             parsed: JsonValue = json.loads(data)
