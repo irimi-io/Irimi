@@ -14,17 +14,20 @@ from irimi._outbound_calls import CallOutcome, Headers, OutboundCall, OutboundRe
 from irimi._response_recording import ResponseRecording, end_without_response
 
 FOLLOWED_RESPONSE_ATTRIBUTE = "_irimi_followed_response"
-LEADING_REQUEST_PARAMETERS = ["self", "conn", "method", "url"]
+LEADING_REQUEST_PARAMETERS = ("self", "conn", "method", "url")
 RECORDED_REQUEST_PARAMETERS = ("body", "headers")
-RESPONSE_METHODS = ("_raw_read", "_handle_chunk", "read_chunked", "close", "isclosed")
+RESPONSE_METHODS = ("_raw_read", "_handle_chunk", "read_chunked", "close")
 DEFAULT_PORTS = {"http": 80, "https": 443}
 LONGEST_BODY_TAKEN = BODY_LIMIT + 1
 
 
 def patch_urllib3(library: ModuleType, interception: Interception) -> bool:
     pool_class: Any = getattr(library, "HTTPConnectionPool", None)
+    connection_class: Any = getattr(pool_class, "ConnectionCls", None)
     response_class: Any = getattr(library, "HTTPResponse", None)
     if not _sends_one_request(getattr(pool_class, "_make_request", None)):
+        return False
+    if not callable(getattr(connection_class, "getresponse", None)):
         return False
     if not _reads_a_body_as_expected(response_class):
         return False
@@ -37,6 +40,7 @@ def patch_urllib3(library: ModuleType, interception: Interception) -> bool:
         "close": _wrap_close(response_class.close, following),
     }
     pool_class._make_request = make_request
+    connection_class.getresponse = _wrap_get_response(connection_class.getresponse, following)
     for name, method in response_methods.items():
         setattr(response_class, name, method)
     return True
@@ -45,7 +49,7 @@ def patch_urllib3(library: ModuleType, interception: Interception) -> bool:
 def _sends_one_request(make_request: object) -> bool:
     if not callable(make_request):
         return False
-    parameters = list(inspect.signature(make_request).parameters)
+    parameters = tuple(inspect.signature(make_request).parameters)
     return parameters[:4] == LEADING_REQUEST_PARAMETERS and set(parameters) >= set(
         RECORDED_REQUEST_PARAMETERS
     )
@@ -61,12 +65,14 @@ class _Attempt:
     def __init__(self, open_call: OpenCall, connection: Any) -> None:
         self.open_call = open_call
         self.connection = connection
+        self.socket: Any = None
         self.recording: ResponseRecording | None = None
 
 
 class _FollowedResponse:
     def __init__(self, recording: ResponseRecording) -> None:
         self.recording = recording
+        self.has_unrecorded_content = False
         self.chunked_reader: GeneratorType[bytes, None, None] | None = None
 
 
@@ -85,9 +91,14 @@ class _ResponseFollowing:
         if followed is not None:
             return followed
         attempt: _Attempt | None = getattr(self._waiting, "attempt", None)
-        if attempt is None or not _reads_from_connection(response, attempt.connection):
+        if attempt is None or not _reads_from_socket(response, attempt.socket):
             return None
         return self._claim(attempt, response)
+
+    def remember_socket_awaiting_response(self, connection: Any) -> None:
+        attempt: _Attempt | None = getattr(self._waiting, "attempt", None)
+        if attempt is not None and attempt.connection is connection:
+            attempt.socket = getattr(connection, "sock", None)
 
     def follow_returned_response(
         self, attempt: _Attempt, response: Any, response_class: type
@@ -96,12 +107,14 @@ class _ResponseFollowing:
         if not can_be_followed:
             self._end_without_a_body(attempt, response)
             return
-        followed = vars(response).get(FOLLOWED_RESPONSE_ATTRIBUTE) or self._claim(attempt, response)
+        followed = vars(response).get(FOLLOWED_RESPONSE_ATTRIBUTE) or self._claim_after_reads(
+            attempt, response
+        )
         if followed is None:
             return
         try:
             if response.isclosed() or response.length_remaining == 0:
-                followed.recording.end(was_read_to_end=True, error=None)
+                _end_finished_response(followed)
         except Exception:
             self._interception.report_failure("record an outbound response")
 
@@ -116,7 +129,7 @@ class _ResponseFollowing:
             if content:
                 followed.recording.add(content)
             if response.isclosed():
-                followed.recording.end(was_read_to_end=True, error=None)
+                _end_finished_response(followed)
         except Exception:
             self._interception.report_failure("record an outbound response")
 
@@ -154,6 +167,17 @@ class _ResponseFollowing:
             return None
         return followed
 
+    def _claim_after_reads(self, attempt: _Attempt, response: Any) -> _FollowedResponse | None:
+        followed = self._claim(attempt, response)
+        if followed is None:
+            return None
+        try:
+            followed.has_unrecorded_content = response.tell() > 0
+        except Exception:
+            followed.has_unrecorded_content = True
+            self._interception.report_failure("record an outbound response")
+        return followed
+
     def _end_without_a_body(self, attempt: _Attempt, response: Any) -> None:
         try:
             outcome = CallOutcome(
@@ -172,10 +196,14 @@ def _is_reading_chunks(followed: _FollowedResponse) -> bool:
     return followed.chunked_reader is not None and followed.chunked_reader.gi_running
 
 
-def _reads_from_connection(response: Any, connection: Any) -> bool:
+def _end_finished_response(followed: _FollowedResponse) -> None:
+    followed.recording.end(was_read_to_end=not followed.has_unrecorded_content, error=None)
+
+
+def _reads_from_socket(response: Any, socket: Any) -> bool:
     try:
-        return bool(response.fileno() == connection.sock.fileno())
-    except (OSError, ValueError, AttributeError):
+        return bool(response.fileno() == socket.fileno())
+    except Exception:
         return False
 
 
@@ -216,6 +244,17 @@ def _wrap_make_request(
         return response
 
     return _make_request
+
+
+def _wrap_get_response(
+    get_response: Callable[..., Any], following: _ResponseFollowing
+) -> Callable[..., Any]:
+    @functools.wraps(get_response)
+    def getresponse(connection: Any, *arguments: Any, **options: Any) -> Any:
+        following.remember_socket_awaiting_response(connection)
+        return get_response(connection, *arguments, **options)
+
+    return getresponse
 
 
 def _wrap_raw_read(read: Callable[..., Any], following: _ResponseFollowing) -> Callable[..., Any]:

@@ -139,6 +139,32 @@ def test_a_response_urllib3_reads_before_returning_it_is_recorded_as_it_arrived(
     assert "flags" not in call_end
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"headers": [("Content-Type", "application/json"), ("Connection", "close")]},
+        {"ends_by_closing": True},
+    ],
+    ids=["with a length", "ended by closing"],
+)
+def test_a_response_read_before_it_is_returned_is_recorded_when_the_server_closes_the_connection(
+    recorded_events: TakeEvents, upstream: Any, answer: dict[str, Any]
+) -> None:
+    upstream.set_answer("/orders", **answer)
+
+    @irimi.workflow
+    def read_orders() -> bytes:
+        return urllib3.request("GET", f"{upstream.url}/orders").data
+
+    assert read_orders() == b'{"ok": true}'
+
+    ((_, call_end),) = take_calls(recorded_events)
+
+    assert call_end["status"] == "ok"
+    assert call_end["response"]["body"]["data"] == '{"ok": true}'
+    assert "flags" not in call_end
+
+
 def test_a_call_sent_through_a_proxy_is_recorded_under_the_address_it_was_meant_for(
     recorded_events: TakeEvents, upstream: Any
 ) -> None:
