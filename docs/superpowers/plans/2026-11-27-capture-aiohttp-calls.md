@@ -333,9 +333,7 @@ def test_a_body_is_recorded_whole_however_the_app_reads_it(
     upstream: Any,
     read_answer: Callable[[aiohttp.ClientResponse], Awaitable[bytes]],
 ) -> None:
-    upstream.set_answer(
-        "/events", headers=[("Content-Type", "text/event-stream")], chunks=EVENTS
-    )
+    upstream.set_answer("/events", headers=[("Content-Type", "text/event-stream")], chunks=EVENTS)
 
     @irimi.workflow
     async def follow_events() -> tuple[bytes, str]:
@@ -626,7 +624,8 @@ The session is made before `init`. Parametrise the two existing tests over the a
 @pytest.mark.parametrize("app", [OUTBOUND_APP, AIOHTTP_APP])
 def test_a_client_made_before_init_and_a_library_imported_after_it_are_both_recorded(
     fake_store: Any, upstream: Any, app: str
-) -> None: ...
+) -> None:
+    ...
     # body unchanged, with OUTBOUND_APP replaced by app
 ```
 
