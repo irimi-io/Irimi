@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 from collections.abc import Awaitable, Callable
@@ -14,13 +15,13 @@ SWITCHING_PROTOCOLS = 101
 INHERITED_ITERATORS = frozenset({"iter_chunked", "iter_any", "iter_chunks"})
 FORWARDED_METHODS = (
     "exception",
+    "set_exception",
     "on_eof",
     "feed_eof",
     "feed_data",
     "is_eof",
     "at_eof",
     "wait_eof",
-    "unread_data",
     "begin_http_chunk_receiving",
     "end_http_chunk_receiving",
     "get_read_buffer_limits",
@@ -28,12 +29,52 @@ FORWARDED_METHODS = (
 )
 FORWARDED_PROPERTIES = ("total_bytes", "total_compressed_bytes", "total_raw_bytes")
 READS_OF_BYTES = ("read", "readany", "readexactly", "readline", "readuntil")
+OWN_SLOTS = ("inner_reader", "recording")
 
 Middleware = Callable[[Any, Callable[[Any], Awaitable[Any]]], Awaitable[Any]]
 
 
+class _BodyRecording:
+    def __init__(self, inner_reader: Any, recording: ResponseRecording) -> None:
+        self._inner_reader = inner_reader
+        self._recording = recording
+        self._position = 0
+        self._copied_length = 0
+        self._failed_read: BaseException | None = None
+
+    def add_read(self, content: bytes) -> None:
+        self._failed_read = None
+        length_already_copied = self._copied_length - self._position
+        self._recording.add(content[length_already_copied:])
+        self._position += len(content)
+        self._copied_length = max(self._copied_length, self._position)
+        if self._inner_reader.at_eof():
+            self._end(error=None)
+
+    def add_failed_read(self, error: BaseException) -> None:
+        if isinstance(error, asyncio.IncompleteReadError):
+            self.add_read(error.partial)
+            return
+        self._failed_read = error
+        if self._inner_reader.exception() is not None:
+            self._end(error)
+
+    def step_back(self, length: int) -> None:
+        self._position -= length
+
+    def end_at_close(self) -> None:
+        self._end(self._failed_read)
+
+    def _end(self, error: BaseException | None) -> None:
+        reader = self._inner_reader
+        was_read_to_end = reader.at_eof() and self._copied_length == reader.total_bytes
+        self._recording.end(was_read_to_end=was_read_to_end, error=error)
+
+
 def patch_aiohttp(library: ModuleType, interception: Interception) -> bool:
     send_request = library.ClientSession._request
+    close_response = library.ClientResponse.close
+    release_response = library.ClientResponse.release
     if "middlewares" not in inspect.signature(send_request).parameters:
         return False
     if not hasattr(library.BytesPayload, "as_bytes"):
@@ -45,6 +86,8 @@ def patch_aiohttp(library: ModuleType, interception: Interception) -> bool:
         return False
     record_call = _build_recording_middleware(library, interception, reader_class)
     library.ClientSession._request = _wrap_request(send_request, interception, record_call)
+    library.ClientResponse.close = _wrap_close(close_response, interception, reader_class)
+    library.ClientResponse.release = _wrap_close(release_response, interception, reader_class)
     return True
 
 
@@ -126,11 +169,31 @@ def _record_response(
         )
         recording = ResponseRecording(interception, open_call, translated)
         if has_body_to_read:
-            response.content = reader_class(content, recording)
+            response.content = reader_class(content, _BodyRecording(content, recording))
         else:
             recording.end(was_read_to_end=True, error=None)
     except Exception:
         interception.report_failure("record an outbound response")
+
+
+def _wrap_close(
+    close_response: Callable[..., Any], interception: Interception, reader_class: type
+) -> Callable[..., Any]:
+    @functools.wraps(close_response)
+    def close(response: Any, *arguments: Any, **options: Any) -> Any:
+        _end_at_close(response, interception, reader_class)
+        return close_response(response, *arguments, **options)
+
+    return close
+
+
+def _end_at_close(response: Any, interception: Interception, reader_class: type[Any]) -> None:
+    try:
+        content = response.content
+        if isinstance(content, reader_class):
+            content.recording.end_at_close()
+    except Exception:
+        interception.report_failure("record the end of an outbound response")
 
 
 def _decode_headers(raw_headers: Any) -> Headers:
@@ -139,10 +202,12 @@ def _decode_headers(raw_headers: Any) -> Headers:
 
 def _build_recording_reader(library: ModuleType) -> type | None:
     members: dict[str, Any] = {
-        "__slots__": ("inner_reader", "recording"),
+        "__slots__": OWN_SLOTS,
         "__init__": _hold_reader,
         "__repr__": _describe_reader,
-        "set_exception": _end_and_set_exception,
+        "__getattr__": _get_from_inner_reader,
+        "__setattr__": _set_on_inner_reader,
+        "unread_data": _unread_data,
         "readchunk": _read_http_chunk,
         "read_nowait": _read_without_waiting,
         **{name: _forward_method(name) for name in FORWARDED_METHODS},
@@ -155,13 +220,24 @@ def _build_recording_reader(library: ModuleType) -> type | None:
     return type("RecordingStreamReader", (library.StreamReader,), members)
 
 
-def _hold_reader(reader: Any, inner_reader: Any, recording: ResponseRecording) -> None:
-    reader.inner_reader = inner_reader
-    reader.recording = recording
+def _hold_reader(reader: Any, inner_reader: Any, recording: _BodyRecording) -> None:
+    object.__setattr__(reader, "inner_reader", inner_reader)
+    object.__setattr__(reader, "recording", recording)
 
 
 def _describe_reader(reader: Any) -> str:
     return repr(reader.inner_reader)
+
+
+def _get_from_inner_reader(reader: Any, name: str) -> Any:
+    return getattr(object.__getattribute__(reader, "inner_reader"), name)
+
+
+def _set_on_inner_reader(reader: Any, name: str, value: Any) -> None:
+    if name in OWN_SLOTS:
+        object.__setattr__(reader, name, value)
+        return
+    setattr(reader.inner_reader, name, value)
 
 
 def _forward_method(name: str) -> Callable[..., Any]:
@@ -175,14 +251,19 @@ def _forward_property(name: str) -> property:
     return property(lambda reader: getattr(reader.inner_reader, name))
 
 
+def _unread_data(reader: Any, data: bytes) -> None:
+    reader.inner_reader.unread_data(data)
+    reader.recording.step_back(len(data))
+
+
 def _copy_read(name: str) -> Callable[..., Awaitable[bytes]]:
     async def read(reader: Any, *arguments: Any, **options: Any) -> bytes:
         try:
             content: bytes = await getattr(reader.inner_reader, name)(*arguments, **options)
         except BaseException as error:
-            reader.recording.end(was_read_to_end=False, error=error)
+            reader.recording.add_failed_read(error)
             raise
-        _record_read(reader, content)
+        reader.recording.add_read(content)
         return content
 
     return read
@@ -192,9 +273,9 @@ async def _read_http_chunk(reader: Any) -> tuple[bytes, bool]:
     try:
         http_chunk: tuple[bytes, bool] = await reader.inner_reader.readchunk()
     except BaseException as error:
-        reader.recording.end(was_read_to_end=False, error=error)
+        reader.recording.add_failed_read(error)
         raise
-    _record_read(reader, http_chunk[0])
+    reader.recording.add_read(http_chunk[0])
     return http_chunk
 
 
@@ -202,20 +283,7 @@ def _read_without_waiting(reader: Any, *arguments: Any, **options: Any) -> bytes
     try:
         content: bytes = reader.inner_reader.read_nowait(*arguments, **options)
     except BaseException as error:
-        reader.recording.end(was_read_to_end=False, error=error)
+        reader.recording.add_failed_read(error)
         raise
-    _record_read(reader, content)
+    reader.recording.add_read(content)
     return content
-
-
-def _record_read(reader: Any, content: bytes) -> None:
-    reader.recording.add(content)
-    if reader.inner_reader.at_eof():
-        reader.recording.end(was_read_to_end=True, error=None)
-
-
-def _end_and_set_exception(reader: Any, *arguments: Any, **options: Any) -> None:
-    try:
-        reader.recording.end(was_read_to_end=reader.inner_reader.at_eof(), error=None)
-    finally:
-        reader.inner_reader.set_exception(*arguments, **options)

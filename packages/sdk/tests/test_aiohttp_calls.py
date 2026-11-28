@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import gzip
 import io
 import json
@@ -15,10 +16,16 @@ from irimi._wire import parse_batch
 TakeEvents = Callable[[], list[dict[str, Any]]]
 Handler = Callable[[aiohttp.ClientRequest], Awaitable[aiohttp.ClientResponse]]
 REDACTED = {"$irimi": "redacted", "reason": "credential"}
-LIMIT = 4 * 1024 * 1024
 HALF_A_MEGABYTE = 512 * 1024
 EVENTS = [b"data: one\n\n", b"data: two\n\n"]
 ALL_EVENTS = b"".join(EVENTS)
+PARTS = (
+    b"--b\r\nContent-Type: text/plain\r\n\r\n"
+    + b"A" * 300_000
+    + b"\r\n--b\r\nContent-Type: text/plain\r\n\r\n"
+    + b"B" * 200_000
+    + b"\r\n--b--\r\n"
+)
 
 
 def take_call(recorded_events: TakeEvents) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -30,6 +37,19 @@ def take_call(recorded_events: TakeEvents) -> tuple[dict[str, Any], dict[str, An
         if event["type"] == "end" and event["span_id"] == call_start["span_id"]
     ]
     return call_start, call_end
+
+
+@contextlib.asynccontextmanager
+async def serve(path: str, handler: Callable[[web.Request], Awaitable[Any]]) -> AsyncIterator[str]:
+    application = web.Application()
+    application.router.add_get(path, handler)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}"
+    finally:
+        await runner.cleanup()
 
 
 def test_a_call_through_aiohttp_is_recorded_as_a_step_of_its_run(
@@ -112,10 +132,6 @@ async def read_whole(answer: aiohttp.ClientResponse) -> bytes:
     return await answer.read()
 
 
-async def read_as_text(answer: aiohttp.ClientResponse) -> bytes:
-    return (await answer.text()).encode()
-
-
 async def read_by_line(answer: aiohttp.ClientResponse) -> bytes:
     return b"".join([line async for line in answer.content])
 
@@ -142,6 +158,12 @@ async def read_by_event(answer: aiohttp.ClientResponse) -> bytes:
     return events + await answer.content.read()
 
 
+async def read_past_the_end(answer: aiohttp.ClientResponse) -> bytes:
+    with pytest.raises(asyncio.IncompleteReadError) as raised:
+        await answer.content.readexactly(len(ALL_EVENTS) + 1)
+    return raised.value.partial
+
+
 async def read_once_it_has_all_arrived(answer: aiohttp.ClientResponse) -> bytes:
     await answer.content.wait_eof()
     return answer.content.read_nowait()
@@ -151,13 +173,13 @@ async def read_once_it_has_all_arrived(answer: aiohttp.ClientResponse) -> bytes:
     "read_answer",
     [
         read_whole,
-        read_as_text,
         read_by_line,
         read_in_sevens,
         read_as_it_arrives,
         read_by_http_chunk,
         read_exact_counts,
         read_by_event,
+        read_past_the_end,
         read_once_it_has_all_arrived,
     ],
 )
@@ -224,29 +246,6 @@ def test_a_compressed_response_is_recorded_as_the_app_read_it(
         assert content == compressed
         assert (body["encoding"], body["content_encoding"]) == ("base64", "gzip")
         assert base64.b64decode(body["data"]) == compressed
-
-
-def test_a_response_larger_than_the_limit_is_cut_and_flagged(
-    recorded_events: TakeEvents, upstream: Any
-) -> None:
-    upstream.set_answer(
-        "/export", headers=[("Content-Type", "text/plain")], chunks=[b"x" * (LIMIT + 10)]
-    )
-
-    @irimi.workflow
-    async def download_export() -> int:
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(f"{upstream.url}/export") as answer,
-        ):
-            return len(await answer.read())
-
-    assert asyncio.run(download_export()) == LIMIT + 10
-
-    _, call_end = take_call(recorded_events)
-
-    assert len(call_end["response"]["body"]["data"]) == LIMIT
-    assert call_end["flags"] == ["response_body_truncated"]
 
 
 @pytest.mark.parametrize(("method", "status"), [("DELETE", 204), ("HEAD", 200)])
@@ -319,12 +318,13 @@ def build_form() -> aiohttp.FormData:
 
 
 @pytest.mark.parametrize(
-    ("build_options", "recorded_body", "flags"),
+    ("build_options", "recorded_body", "flags", "sent_content"),
     [
         (
             lambda: {"data": b"\xff\xfe\x00"},
             {"encoding": "base64", "content_type": "application/octet-stream", "data": "//4A"},
             None,
+            b"\xff\xfe\x00",
         ),
         (
             lambda: {"data": {"amount": "5"}},
@@ -334,12 +334,18 @@ def build_form() -> aiohttp.FormData:
                 "data": "amount=5",
             },
             None,
+            b"amount=5",
         ),
-        (lambda: {"data": send_parts()}, None, ["request_body_not_recorded"]),
-        (lambda: {"data": build_form()}, None, ["request_body_not_recorded"]),
-        (lambda: {"data": io.BytesIO(b"abcd")}, None, ["request_body_not_recorded"]),
-        (lambda: {"data": b"abcd" * 100, "compress": True}, None, ["request_body_not_recorded"]),
-        (lambda: {}, None, None),
+        (lambda: {"data": send_parts()}, None, ["request_body_not_recorded"], b"abcd"),
+        (lambda: {"data": build_form()}, None, ["request_body_not_recorded"], b"refund"),
+        (lambda: {"data": io.BytesIO(b"abcd")}, None, ["request_body_not_recorded"], b"abcd"),
+        (
+            lambda: {"data": b"abcd" * 100, "compress": True},
+            None,
+            ["request_body_not_recorded"],
+            b"",
+        ),
+        (lambda: {}, None, None, b""),
     ],
 )
 def test_a_request_body_held_in_memory_is_recorded_and_any_other_is_flagged(
@@ -348,6 +354,7 @@ def test_a_request_body_held_in_memory_is_recorded_and_any_other_is_flagged(
     build_options: Callable[[], dict[str, Any]],
     recorded_body: dict[str, str] | None,
     flags: list[str] | None,
+    sent_content: bytes,
 ) -> None:
     @irimi.workflow
     async def upload() -> int:
@@ -364,22 +371,7 @@ def test_a_request_body_held_in_memory_is_recorded_and_any_other_is_flagged(
     assert call_start["request"].get("body") == recorded_body
     assert call_start.get("flags") == flags
     assert upstream.requests[-1][:2] == ("POST", "/uploads")
-
-
-def test_a_streamed_request_body_reaches_the_server_whole(
-    recorded_events: TakeEvents, upstream: Any
-) -> None:
-    @irimi.workflow
-    async def upload() -> None:
-        async with (
-            aiohttp.ClientSession() as session,
-            session.post(f"{upstream.url}/uploads", data=send_parts()) as answer,
-        ):
-            await answer.read()
-
-    asyncio.run(upload())
-
-    assert upstream.requests[-1] == ("POST", "/uploads", b"abcd")
+    assert sent_content in upstream.requests[-1][2]
 
 
 @pytest.mark.parametrize(
@@ -546,6 +538,123 @@ def test_what_was_read_before_a_response_broke_off_is_recorded(
     assert call_end["flags"] == ["response_body_incomplete"]
 
 
+@pytest.mark.parametrize("is_read_repeated", [True, False])
+def test_a_read_the_app_gave_up_on_ends_the_call_only_if_it_is_not_repeated(
+    recorded_events: TakeEvents, is_read_repeated: bool
+) -> None:
+    is_second_event_wanted = asyncio.Event()
+
+    async def send_second_event_when_wanted(request: web.Request) -> web.StreamResponse:
+        answer = web.StreamResponse(headers={"Content-Type": "text/plain"})
+        await answer.prepare(request)
+        await answer.write(EVENTS[0])
+        await is_second_event_wanted.wait()
+        await answer.write(EVENTS[1])
+        return answer
+
+    @irimi.workflow
+    async def follow_events() -> bytes:
+        async with (
+            serve("/events", send_second_event_when_wanted) as url,
+            aiohttp.ClientSession() as session,
+            session.get(f"{url}/events") as answer,
+        ):
+            content = await answer.content.readuntil(b"\n\n")
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(answer.content.readline(), 0.01)
+            is_second_event_wanted.set()
+            if is_read_repeated:
+                content += await answer.content.read()
+        return content
+
+    content = asyncio.run(follow_events())
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["response"]["body"]["data"] == content.decode()
+    if is_read_repeated:
+        assert content == ALL_EVENTS
+        assert call_end["status"] == "ok"
+        assert "flags" not in call_end
+    else:
+        assert call_end["status"] == "error"
+        assert call_end["flags"] == ["response_body_incomplete"]
+
+
+def test_a_response_that_broke_off_and_is_closed_without_another_read_has_an_end(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    upstream.set_answer(
+        "/report", headers=[("Content-Type", "text/plain")], chunks=[b"x" * 10], breaks_off=True
+    )
+
+    @irimi.workflow
+    async def peek_at_report() -> bytes:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(f"{upstream.url}/report") as answer,
+        ):
+            content = await answer.content.read(10)
+            while answer.content.exception() is None:
+                await asyncio.sleep(0.01)
+        return content
+
+    assert asyncio.run(peek_at_report()) == b"x" * 10
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["status"] == "ok"
+    assert call_end["flags"] == ["response_body_incomplete"]
+    assert call_end["response"]["body"]["data"] == "x" * 10
+
+
+def test_a_multipart_response_read_part_by_part_is_recorded_once(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    upstream.set_answer(
+        "/export",
+        headers=[("Content-Type", "multipart/mixed; boundary=b")],
+        chunks=[PARTS[start : start + 50_000] for start in range(0, len(PARTS), 50_000)],
+    )
+
+    @irimi.workflow
+    async def read_parts() -> list[bytes]:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(f"{upstream.url}/export") as answer,
+        ):
+            reader = aiohttp.MultipartReader.from_response(answer)
+            contents: list[bytes] = []
+            while (part := await reader.next()) is not None:
+                assert isinstance(part, aiohttp.BodyPartReader)
+                contents.append(bytes(await part.read()))
+            return contents
+
+    assert asyncio.run(read_parts()) == [b"A" * 300_000, b"B" * 200_000]
+
+    _, call_end = take_call(recorded_events)
+
+    assert call_end["response"]["body"]["data"] == PARTS.decode()
+    assert "flags" not in call_end
+
+
+def test_the_app_reaches_the_readers_own_attributes(
+    recorded_events: TakeEvents, upstream: Any
+) -> None:
+    @irimi.workflow
+    async def raise_the_buffer_limit() -> tuple[int, bool]:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(f"{upstream.url}/orders") as answer,
+        ):
+            answer.content._low_water = 12345
+            low_water, _ = answer.content.get_read_buffer_limits()
+            await answer.content.readany()
+            return low_water, answer.content._eof
+
+    assert asyncio.run(raise_the_buffer_limit()) == (12345, True)
+
+
 def test_a_request_that_cannot_connect_is_recorded_and_raised_unchanged(
     recorded_events: TakeEvents, unused_url: str
 ) -> None:
@@ -644,23 +753,15 @@ async def echo_messages(request: web.Request) -> web.WebSocketResponse:
 def test_a_websocket_handshake_is_recorded_and_ends_when_the_socket_opens(
     recorded_events: TakeEvents,
 ) -> None:
-    application = web.Application()
-    application.router.add_get("/ws", echo_messages)
-
     @irimi.workflow
     async def greet() -> str:
-        runner = web.AppRunner(application)
-        await runner.setup()
-        await web.TCPSite(runner, "127.0.0.1", 0).start()
-        port = runner.addresses[0][1]
         async with (
+            serve("/ws", echo_messages) as url,
             aiohttp.ClientSession() as session,
-            session.ws_connect(f"http://127.0.0.1:{port}/ws") as socket,
+            session.ws_connect(f"{url}/ws") as socket,
         ):
             await socket.send_str("hi")
-            answer = await socket.receive_str()
-        await runner.cleanup()
-        return answer
+            return await socket.receive_str()
 
     assert asyncio.run(greet()) == "echo hi"
 

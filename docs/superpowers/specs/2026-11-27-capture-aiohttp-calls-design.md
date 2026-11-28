@@ -42,6 +42,10 @@ The wrapper around `_request` does nothing else. It reads the middlewares in eff
 calls the original with the same arguments. If that step fails, the failure is counted and the
 request is sent unrecorded.
 
+`ClientResponse.close` and `ClientResponse.release` are wrapped as well, only to end the call's
+recording before the original runs. Every way a response is closed goes through one of the two
+(leaving `async with`, `raise_for_status`, a followed redirect, the session's own error paths).
+
 **Why not `ClientRequest.send`,** the candidate in the piece 4 spec:
 
 - It runs after the connection is taken, so a request that cannot connect never reaches it and
@@ -92,21 +96,44 @@ original and passes every call to it. A read also copies what it returns, up to 
 - The parser and the connection keep feeding the original reader. `StreamReader` has
   `__slots__`, so a method cannot be replaced on one instance, and the object the parser holds
   cannot be swapped. That leaves wrapping.
-- The recording reader does not run `StreamReader.__init__`, so no inherited method may run on
-  it except the four iterator factories, which only call the public read methods. At patch time
+- The recording reader does not run `StreamReader.__init__` and holds no state of the stream.
+  An attribute it does not have, the inherited private slots included (`_buffer`, `_eof`), is
+  read from the original reader, and an attribute set on it is set on the original, so the app
+  sees what it sees unpatched. No inherited method is meant to run on it except the four
+  iterator factories, which only call the public read methods. At patch time
   the patch checks that every public name `aiohttp`'s `StreamReader` defines is one the
   recording reader handles. If a newer `aiohttp` has a name it does not know, the library is
   left unpatched with the warning, instead of an `AttributeError` reaching the app later.
+
+**What is copied.** The recording follows the reader's position in the body. A read copies the
+bytes it returns that lie past what is already copied, and `unread_data` moves the position
+back by what it is given, as `aiohttp` does with its own cursor. So bytes pushed back and read
+again are recorded once. `aiohttp`'s `MultipartReader` pushes back for every part that has no
+`Content-Length`.
 
 **When the call ends,** once, on the first of:
 
 1. The headers arrive and no body follows: `response.content.at_eof()` is already true (a
    `HEAD`, a 204 or 304, an empty body), or the status is 101. Whole.
 2. A read returns and the reader is at its end. Whole.
-3. A read raises. `error`, with what earlier reads returned, flagged `response_body_incomplete`.
-4. The response is closed or released before its end. `aiohttp` then calls `set_exception` on
-   `response.content` (`ClientResponse._notify_content`), which is where the recording reader
-   sees it. `ok`, flagged `response_body_incomplete` unless the event-stream rule applies.
+3. A read raises and the stream is dead: the original reader holds an exception
+   (`exception()`), which is what makes every later read raise. `error`, with what earlier
+   reads returned, flagged `response_body_incomplete`.
+4. The response is closed or released, seen by the wrapped `close` and `release`. `ok`,
+   flagged `response_body_incomplete` unless the reader is at its end or the event-stream rule
+   applies. If the last read before the close raised, the call ends `error` with what that
+   read raised.
+
+A read that raises while the stream lives does not end the call: an `aiohttp` reader stays
+readable after a read is cancelled (`asyncio.wait_for` around `readline` in a heartbeat loop)
+or refused (a second reader while one waits). The app reads again and the recording goes on.
+A `readexactly` past the end raises `IncompleteReadError` carrying the bytes it took; they are
+copied and the call ends whole.
+
+The body is whole when the reader is at its end and the bytes copied are as many as the reader
+was fed (`total_bytes`). A read that raised after taking bytes the app never got (a cancelled
+`read()`, a line longer than the limit) leaves them out of the copy, and the call is flagged
+`response_body_incomplete`.
 
 A response that is never read to its end and never closed has no end event, as with `httpx`.
 "At its end" is `at_eof()`: the body's end has arrived and nothing is left to read. An app that
@@ -147,8 +174,14 @@ before the final chunk has arrived; that call is flagged `response_body_incomple
 8. **There is no sync client.** Every call is made on an event loop, and the middleware runs in
    the task that made the call, so the current call is found as it is for `httpx`'s async
    client.
-9. **Bytes pushed back are copied twice.** `StreamReader.unread_data`, deprecated in `aiohttp`,
-   puts bytes back to be read again, and they are recorded again.
+9. **A read that raises does not always end the call.** Through `httpx` a failed read is the
+   end of the stream. Through `aiohttp` the call ends with the error only when the stream is
+   dead, or when the response is closed with that read as the last one. A response that broke
+   off after the app's last read, and is then closed, ends `ok`, flagged
+   `response_body_incomplete`: the app saw no error.
+10. **Bytes pushed back are assumed to be the bytes last read.** `StreamReader.unread_data`
+    is given no way to say otherwise. An app that pushes back other bytes has the bytes the
+    response carried recorded, not the ones it pushed.
 
 Not departures, checked: a multipart form and a body given as an iterator are not recorded
 through `httpx` either; each redirect hop and each retry is one call in both; the event-stream
@@ -187,10 +220,12 @@ Kept small, because #18 and #19 change the same files.
 - One test per behaviour the patch owns: a call as a step of its run; every way of reading a
   body (parametrised); decoded and undecoded compressed bodies; request bodies in memory and
   streamed (parametrised); redirect hops; an early close; the event-stream rule on a decoded
-  body; a response that breaks off; a request that cannot connect; no body; a call outside a
-  workflow; credentials; many streams at once; the app's own middlewares; a websocket.
+  body; a response that breaks off; a read given up on and repeated, or not; a response that
+  broke off and is closed without another read; a multipart response read part by part; the
+  reader's own attributes; a request that cannot connect; no body; a call outside a workflow;
+  credentials; many streams at once; the app's own middlewares; a websocket.
 - Shared logic is not tested again per library: the credential list, joined headers, the
-  cut at a character boundary.
+  cut at a character boundary, the size limit.
 - Where cases differ only in the library, the existing tests take it as a parameter: the two
   subprocess tests in `test_fail_open.py` (a client made before `init`; the app unchanged
   whatever the store does), and the expected `InitResult` in `test_outbound_calls.py`.
@@ -202,6 +237,11 @@ Kept small, because #18 and #19 change the same files.
 
 ## Risks
 
+- **`ClientResponse.close` and `release` are wrapped for every response.** The wrapper looks
+  at `response.content`, ends a recording if there is one, and calls the original; a failure
+  in it is counted and the original still runs. A response class that overrides both without
+  calling the originals is not seen closing, and its call has no end event unless read to its
+  end.
 - **`_request` and `_middlewares` are private names.** Limit: the patch checks the `middlewares`
   parameter at patch time and leaves the library unpatched without it; reading
   `session._middlewares` is guarded and counted. A renamed attribute means calls are not
@@ -225,4 +265,5 @@ Kept small, because #18 and #19 change the same files.
 Nothing beyond what was approved on 2026-11-27. Three choices in this note are the author's and
 worth a look: `aiohttp` before 3.13.0 is left unpatched; a request body sent with `compress=` is
 flagged `request_body_not_recorded`, a flag the piece 4 spec describes for streamed bodies; a
-newer `aiohttp` with an unknown `StreamReader` name is left unpatched.
+newer `aiohttp` with an unknown `StreamReader` name is left unpatched. A fourth came out of the
+review of the PR: `ClientResponse.close` and `release` are wrapped to see a response close.
